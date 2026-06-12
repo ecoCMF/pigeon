@@ -7,8 +7,9 @@ Antigravity, Codex) and their sub-agents **share project context and hand work
 to each other efficiently** — minimal tokens, no re-transmission of state,
 validated messages. Small enough to live inside any repository.
 
-The canonical project context is [`AGENTS.md`](AGENTS.md); this README is for
-operators installing and running the tool.
+The canonical project context is [`AGENTS.md`](AGENTS.md); this README is the
+narrative tour. **The complete reference — every command, config key, tasks-file
+field, MCP tool, and troubleshooting table — is [`docs/MANUAL.md`](docs/MANUAL.md).**
 
 > **Field note (June 2026).** When Google sunset Gemini CLI in favor of
 > Antigravity, repos using agentctx needed **zero changes**: Antigravity reads
@@ -266,14 +267,23 @@ Inspect with `pigeon runs`.
 ```bash
 pip install -e ".[mcp]"
 claude mcp add pigeon -- pigeon --root /path/to/repo mcp
+# servers connect at session startup — restart the session after adding
 ```
 
-exposes `retrieve`, `handoff_write` / `handoff_read` / `handoff_validate`,
-`coordinate_run` / `coordinate_status`, `metrics_summary`, `repo_manifest`, and
-`refresh` as native MCP tools (stdio), so Claude Code, Codex, Gemini CLI, or
-opencode use the contract directly instead of shelling out. Same validation
-and token-accounting paths as the CLI; coordinate's live output goes to stderr
-so the protocol stream stays clean.
+Pigeon **works as an MCP server**: any MCP client (Claude Code, Codex, Gemini
+CLI, opencode, IDEs) gets **13 native tools** over stdio — `retrieve`, `pack`,
+`coordinate_plan` / `coordinate_run` / `coordinate_status`, `handoff_write` /
+`handoff_read` / `handoff_validate`, `distill`, `graph_query`,
+`metrics_summary`, `repo_manifest`, and `refresh` — the entire contract
+without shelling out, through the same validation and token-accounting paths
+as the CLI. Coordinate's live output goes to stderr so the protocol stream
+stays clean, and config is re-read per call (no server restarts on config
+edits).
+
+The coordinator loop for an orchestrating agent: `coordinate_plan` (look
+before leaping) → `coordinate_run` (budgets + telemetry on) →
+`coordinate_status` → `distill`. Full tool signatures in
+[`docs/MANUAL.md` §7](docs/MANUAL.md#7-the-mcp-server).
 
 ## Layout
 
