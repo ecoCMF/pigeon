@@ -133,8 +133,15 @@ _print_lock = threading.Lock()
 
 
 # ----------------------------------------------------------------- tasks file
-def load_tasks(path: Path) -> dict[str, Any]:
-    """Load and structurally validate a tasks definition (JSON or YAML)."""
+def load_tasks(path: Path,
+               default_runner: str | list[str] | None = None) -> dict[str, Any]:
+    """Load and structurally validate a tasks definition (JSON or YAML).
+
+    Tasks without a ``runner`` are resolved via ``default_runner``: a name
+    assigns that runner, a list round-robins across it (task order), and
+    ``None`` raises — pigeon never silently routes work to a runner you
+    didn't choose (that is how Pro plans evaporate in ten minutes).
+    """
     path = Path(path)
     if not path.is_file():
         raise FileNotFoundError(f"tasks file not found: {path}")
@@ -188,7 +195,7 @@ def load_tasks(path: Path) -> dict[str, Any]:
                     )
             if not skills and not members:
                 raise ValueError(f"task {tid!r}: 'crew' is empty")
-        task.setdefault("runner", "claude")
+        # runner resolution happens after the whole structural pass
 
     # Dependency graph: `needs` must reference known tasks and stay acyclic.
     ids = {t["id"] for t in tasks}
@@ -217,6 +224,24 @@ def load_tasks(path: Path) -> dict[str, Any]:
     if resolved != len(ids):
         cyclic = sorted(tid for tid, deg in indegree.items() if deg > 0)
         raise ValueError(f"dependency cycle among tasks: {', '.join(cyclic)}")
+
+    unassigned = [t for t in tasks if not t.get("runner")]
+    if unassigned:
+        if default_runner is None:
+            ids = ", ".join(t["id"] for t in unassigned)
+            raise ValueError(
+                f"task(s) {ids} name no runner and coordinate.default_runner "
+                "is not set — name a runner per task, or set "
+                "coordinate.default_runner to a runner name (or a list of "
+                "names for round-robin)"
+            )
+        pool = ([default_runner] if isinstance(default_runner, str)
+                else list(default_runner))
+        if not pool or not all(isinstance(r, str) and r for r in pool):
+            raise ValueError("coordinate.default_runner must be a runner "
+                             "name or a non-empty list of names")
+        for i, task in enumerate(unassigned):
+            task["runner"] = pool[i % len(pool)]
     return spec
 
 
@@ -1104,7 +1129,8 @@ def run_coordinate(
     budget_usd: float | None = None,
 ) -> int:
     """Coordinate a tasks file end to end. 0 = all green, 1 = failures, 2 = refused."""
-    spec = load_tasks(Path(tasks_path))
+    spec = load_tasks(Path(tasks_path),
+                      default_runner=config.coordinate_cfg.get("default_runner"))
     sid: str = spec["sid"]
     tasks: list[dict[str, Any]] = spec["tasks"]
 
@@ -1168,7 +1194,15 @@ def run_coordinate(
             artifacts=artifacts or None,
             decisions=task.get("decisions") or None,
             rag=task.get("rag") or None,
-            constraints={**SAFETY_CONSTRAINTS, **(task.get("constraints") or {})},
+            constraints={**SAFETY_CONSTRAINTS,
+                         **({"subagents": (
+                             "dispatch only the subagents contracted in this "
+                             "handoff's crew (none contracted = none spawned); "
+                             "do not fan out additional subagents — spend is "
+                             "metered")}
+                            if ccfg.get("safety", {}).get("restrain_subagents", True)
+                            else {}),
+                         **(task.get("constraints") or {})},
             crew=task.get("crew") or None,
             context_ref=task.get("context_ref", "manifest@HEAD"),
         )

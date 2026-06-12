@@ -93,6 +93,12 @@ def default_config(contract_dir: str = LEGACY_CONTRACT_DIR) -> dict[str, Any]:
             "events_dir": f"{d}/coordinate/events",
             "worktrees_dir": f"{d}/coordinate/worktrees",
             "parallel_limit": 4,
+            # Runner for tasks that don't name one. A string assigns it to
+            # every unassigned task; a LIST round-robins across them (spread
+            # load off your metered CLI); null (default) REFUSES unassigned
+            # tasks — after one too many surprise bills, implicit routing to
+            # an expensive runner is not a default this tool will ever have.
+            "default_runner": None,
             # Run `pigeon distill <sid>` automatically when a coordinate run ends.
             "auto_distill": False,
             # argv templates; placeholders: {prompt} {handoff} {root} {task_id} {sid}
@@ -127,7 +133,11 @@ def default_config(contract_dir: str = LEGACY_CONTRACT_DIR) -> dict[str, Any]:
                 # pip install/remove & library changes only inside a conda env,
                 # virtualenv, or container — never the system interpreter.
                 "require_isolated_env_for_packages": True,
-                # Children inherit AGENTCTX_DEPTH; a child running `coordinate`
+                # Soft brake on internal fan-out: adds a handoff constraint
+            # telling agents to dispatch only the contracted crew (if any),
+            # not improvised subagent swarms. Prompt-level, defense in depth.
+            "restrain_subagents": True,
+            # Children inherit AGENTCTX_DEPTH; a child running `coordinate`
                 # again past this depth is refused (no agent fork-bombs).
                 "max_depth": 1,
             },

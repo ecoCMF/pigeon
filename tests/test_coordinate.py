@@ -60,9 +60,11 @@ def test_load_tasks_yaml_and_json(repo):
         spec = co.load_tasks(path)
         assert spec["sid"] == "co1"
         assert [t["id"] for t in spec["tasks"]] == ["t1", "t2"]
-        # default runner is filled in when omitted
+        # no runner + no default = refused (the 10-minute-Pro-burn lesson)
         path2 = _write_tasks(repo.root, {"sid": "s", "tasks": [{"id": "a", "doing": "x"}]}, fmt)
-        assert co.load_tasks(path2)["tasks"][0]["runner"] == "claude"
+        with pytest.raises(ValueError, match="default_runner"):
+            co.load_tasks(path2)
+        assert co.load_tasks(path2, default_runner="agy")["tasks"][0]["runner"] == "agy"
 
 
 @pytest.mark.parametrize("spec,needle", [
@@ -905,3 +907,54 @@ def test_render_status_shows_failed_task_log_tail(repo):
     assert "# exit 1" not in text  # bookkeeping lines filtered
     # without a config, no tail (TUI header path stays cheap)
     assert "⌙" not in co.render_status(run)
+
+
+# -------------------------------------------------------------- runner routing
+def test_default_runner_round_robin_spreads_load(repo):
+    path = _write_tasks(repo.root, {"sid": "s", "tasks": [
+        {"id": f"t{i}", "doing": "x"} for i in range(5)]})
+    spec = co.load_tasks(path, default_runner=["agy", "opencode"])
+    runners = [t["runner"] for t in spec["tasks"]]
+    assert runners == ["agy", "opencode", "agy", "opencode", "agy"]
+    # explicit choices are never overridden
+    path2 = _write_tasks(repo.root, {"sid": "s", "tasks": [
+        {"id": "a", "doing": "x", "runner": "claude"},
+        {"id": "b", "doing": "y"}]})
+    spec2 = co.load_tasks(path2, default_runner=["agy"])
+    assert [t["runner"] for t in spec2["tasks"]] == ["claude", "agy"]
+
+
+def test_config_default_runner_reaches_run_and_plan(repo, capsys):
+    import yaml as _yaml
+    (repo.root / ".git").mkdir(exist_ok=True)
+    (repo.root / ".agentctx" / "config.yaml").write_text(_yaml.safe_dump({
+        "coordinate": {
+            "default_runner": "py",
+            "runners": {"py": _PY_OK},
+        }}), encoding="utf-8")
+    cfg = load_config(repo.root)
+    tasks = _write_tasks(repo.root, _spec(tasks=[{"id": "a", "doing": "x"}]))
+    assert co.run_coordinate(tasks, cfg, dry_run=True) == 0
+    run = co.list_runs(cfg, sid="co1")[0]
+    assert run["tasks"]["a"]["runner"] == "py"
+
+
+def test_restrain_subagents_constraint_default_on(repo):
+    cfg = _setup(repo)
+    tasks = _write_tasks(repo.root, _spec(tasks=[{"id": "a", "runner": "py", "doing": "x"}]))
+    assert co.run_coordinate(tasks, cfg, dry_run=True) == 0
+    h = ho.load_handoff(next(cfg.handoffs_dir.glob("co1-*.json")), cfg)
+    assert "do not fan out additional subagents" in h["constraints"]["subagents"]
+
+
+def test_restrain_subagents_can_be_disabled(repo):
+    import yaml as _yaml
+    (repo.root / ".git").mkdir(exist_ok=True)
+    (repo.root / ".agentctx" / "config.yaml").write_text(_yaml.safe_dump({
+        "coordinate": {"runners": {"py": _PY_OK},
+                       "safety": {"restrain_subagents": False}}}), encoding="utf-8")
+    cfg = load_config(repo.root)
+    tasks = _write_tasks(repo.root, _spec(tasks=[{"id": "a", "runner": "py", "doing": "x"}]))
+    assert co.run_coordinate(tasks, cfg, dry_run=True) == 0
+    h = ho.load_handoff(next(cfg.handoffs_dir.glob("co1-*.json")), cfg)
+    assert "subagents" not in h["constraints"]

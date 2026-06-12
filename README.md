@@ -97,6 +97,22 @@ a conda env, virtualenv, or container; the same policy is embedded in every
 handoff's `constraints`. Unattended flags (`--dangerously-skip-permissions`)
 are appended only with explicit `--skip-permissions`.
 
+**Runner routing — read this before your first real run.** A task with no
+`runner:` is **refused** unless `coordinate.default_runner` is set: a name
+routes all unassigned tasks there, a *list* round-robins across it. Spread
+load off your metered CLI:
+
+```yaml
+coordinate:
+  default_runner: [agy, opencode]   # claude only where a task asks for it
+```
+
+Cost containment is layered: `--budget-tokens/--budget-usd` are hard
+ceilings but count **measured** spend — pair them with `--telemetry` (or
+per-task `telemetry: true`) or they cannot see untracked runners. Every
+handoff also carries a `subagents` constraint ("dispatch only the
+contracted crew") unless `safety.restrain_subagents: false`.
+
 Tasks may declare `needs: [other-id]` — an acyclic dependency graph. A task
 launches once everything it needs has exited 0; everything downstream of a
 failure is skipped, never run. Tasks without edges stay fully parallel.
