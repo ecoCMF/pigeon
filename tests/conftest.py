@@ -58,6 +58,10 @@ def repo(tmp_path: Path) -> Config:
     actx = root / ".agentctx"
     (actx / "handoffs").mkdir(parents=True)
     (actx / "handoff.schema.json").write_text(_REAL_SCHEMA.read_text(encoding="utf-8"), encoding="utf-8")
+    # pin generated pointers so sync tests don't depend on what's on PATH;
+    # auto-detection is exercised explicitly in test_context.py
+    (actx / "config.yaml").write_text(
+        "paths:\n  generated: [CLAUDE.md, GEMINI.md]\n", encoding="utf-8")
     (root / "AGENTS.md").write_text(_AGENTS, encoding="utf-8")
     (root / "pyproject.toml").write_text(_PYPROJECT, encoding="utf-8")
     pkg = root / "src" / "pkg"

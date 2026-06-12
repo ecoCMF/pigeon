@@ -296,7 +296,8 @@ before leaping) → `coordinate_run` (budgets + telemetry on) →
 
 ```
 AGENTS.md                  canonical context — single source of truth
-CLAUDE.md / GEMINI.md      generated pointers (do not edit; no duplicated prose => no drift)
+CLAUDE.md / GEMINI.md      generated pointers, one per agent CLI on PATH
+                           (auto-detected; Codex/opencode read AGENTS.md directly)
 .pigeon/                   contract dir (repos scaffolded before the rename
                            use `.agentctx/` — honored forever, never migrated)
   config.yaml              paths, retrieval settings, feature flags

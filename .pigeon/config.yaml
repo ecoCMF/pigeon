@@ -5,9 +5,10 @@ schema_version: "1.0"  # config-format version — NOT the handoff schema
 
 paths:
   canonical: AGENTS.md
-  generated:
-    - CLAUDE.md
-    - GEMINI.md
+  # explicit (override): this public repo ships pointers for both tools
+  # regardless of what any contributor has installed. New repos default to
+  # `generated: auto`. See docs/MANUAL.md §5.
+  generated: [CLAUDE.md, GEMINI.md]
   manifest: .pigeon/manifest.json
   handoffs_dir: .pigeon/handoffs
   metrics: .pigeon/metrics.jsonl

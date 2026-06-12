@@ -8,6 +8,8 @@ pre-commit check can detect staleness and ``refresh`` can prove it re-synced.
 
 from __future__ import annotations
 
+import shutil
+
 import hashlib
 from pathlib import Path
 
@@ -85,6 +87,47 @@ def context_status(config: Config) -> list[tuple[Path, str]]:
     return out
 
 
+# Known agent CLIs. Value = the dedicated instruction file the tool
+# auto-loads, or None when it reads AGENTS.md natively (the cross-tool
+# standard — Codex, opencode, Copilot) so NO pointer file is generated.
+# Add a row here when a CLI needs its own filename; that is the whole
+# maintenance surface, and detection keeps it honest against $PATH.
+CLI_REGISTRY: dict[str, str | None] = {
+    "claude": "CLAUDE.md",
+    "gemini": "GEMINI.md",
+    "codex": None,       # reads AGENTS.md
+    "opencode": None,    # reads AGENTS.md
+    "copilot": None,     # reads AGENTS.md
+}
+
+# Filenames pigeon may ever generate (for the pre-commit hook to stage).
+POINTER_FILENAMES: tuple[str, ...] = tuple(
+    sorted({v for v in CLI_REGISTRY.values() if v})
+)
+
+
+def detect_pointer_files() -> list[str]:
+    """Pointer filenames for agent CLIs actually installed on PATH.
+
+    A tool that reads AGENTS.md natively contributes nothing — the canonical
+    file already serves it. Returns [] when no dedicated-file CLI is found
+    (AGENTS.md still stands on its own)."""
+    return [fname for binary, fname in CLI_REGISTRY.items()
+            if fname and shutil.which(binary)]
+
+
+def resolve_generated(config: Config) -> list[Path]:
+    """The pointer files to (re)generate.
+
+    ``paths.generated`` may be an explicit list (honored verbatim — the
+    override for 'I'm adopting Codex next week' or CI without the CLI on
+    PATH), or the string ``"auto"`` / absent (detect installed CLIs at every
+    refresh, so the set is never one step behind your toolbox)."""
+    spec = config.data["paths"].get("generated", "auto")
+    names = detect_pointer_files() if spec in ("auto", None) else list(spec)
+    return [config._p(n) for n in names]
+
+
 def sync_context(config: Config) -> list[Path]:
     """Regenerate every pointer file from AGENTS.md. Returns written paths.
 
@@ -98,7 +141,7 @@ def sync_context(config: Config) -> list[Path]:
         )
     fp = source_fingerprint(config.canonical)
     written: list[Path] = []
-    for target in config.generated:
+    for target in resolve_generated(config):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(generated_body(config, target.stem, fp), encoding="utf-8")
         written.append(target)

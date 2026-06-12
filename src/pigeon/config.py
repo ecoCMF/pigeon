@@ -40,7 +40,7 @@ def default_config(contract_dir: str = LEGACY_CONTRACT_DIR) -> dict[str, Any]:
         "schema_version": "1.0",
         "paths": {
             "canonical": "AGENTS.md",
-            "generated": ["CLAUDE.md", "GEMINI.md"],
+            "generated": "auto",  # detect installed CLIs; or an explicit list
             "manifest": f"{d}/manifest.json",
             "handoffs_dir": f"{d}/handoffs",
             "metrics": f"{d}/metrics.jsonl",
@@ -216,7 +216,8 @@ class Config:
 
     @property
     def generated(self) -> list[Path]:
-        return [self._p(p) for p in self.data["paths"]["generated"]]
+        from . import context
+        return context.resolve_generated(self)
 
     @property
     def manifest(self) -> Path:

@@ -24,7 +24,10 @@ def _gitignore_entries(dirname: str) -> list[str]:
         f"{dirname}/vector/",
     ]
 
-_HOOK = """\
+def _hook_text() -> str:
+    from .context import POINTER_FILENAMES
+    pointers = " ".join(POINTER_FILENAMES)
+    return f"""\
 #!/usr/bin/env bash
 # Installed by `pigeon init --with-hook`: keep generated context in sync.
 set -euo pipefail
@@ -33,7 +36,11 @@ if command -v pigeon >/dev/null 2>&1; then
 else
     python -m pigeon.cli refresh >/dev/null
 fi
-git add AGENTS.md CLAUDE.md GEMINI.md >/dev/null 2>&1 || true
+git add AGENTS.md >/dev/null 2>&1 || true
+# stage any pointer file that exists (only installed CLIs generate one)
+for f in {pointers}; do
+    [ -f "$f" ] && git add "$f" >/dev/null 2>&1 || true
+done
 """
 
 
@@ -106,7 +113,7 @@ def _install_hook(root: Path, actions: list[str], *, force: bool) -> None:
     if hook.exists() and not force:
         actions.append("skip   pre-commit hook (exists; use --force to replace)")
         return
-    hook.write_text(_HOOK, encoding="utf-8")
+    hook.write_text(_hook_text(), encoding="utf-8")
     hook.chmod(0o755)
     actions.append("write  .git/hooks/pre-commit")
 

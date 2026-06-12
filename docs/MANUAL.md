@@ -46,9 +46,17 @@ prefers `.pigeon/`, falls back to `.agentctx/`, and never migrates.
 
 ## 2. Concepts
 
-- **Canonical context.** `AGENTS.md` is the single source of truth;
-  `CLAUDE.md`/`GEMINI.md` are generated pointers (`pigeon refresh`). No
-  duplicated prose, no drift.
+- **Canonical context.** `AGENTS.md` is the single source of truth and the
+  cross-tool standard — Codex, opencode, and Copilot read it directly, so
+  they need no extra file. A few CLIs auto-load their *own* filename
+  (Claude Code → `CLAUDE.md`, Gemini CLI → `GEMINI.md`); `pigeon refresh`
+  generates those as thin pointers back to AGENTS.md (no duplicated prose,
+  no drift). With `paths.generated: auto` (the default), pigeon detects which
+  of those CLIs are on `PATH` and generates **only** their pointer — never a
+  file for a tool that reads AGENTS.md natively, and never one for a tool you
+  don't have installed. Pin an explicit list to override (e.g. ship both
+  regardless of PATH, as this repo does, or pre-create a file for a CLI
+  you're adopting next week). Registry: `pigeon.context.CLI_REGISTRY`.
 - **Handoff.** A JSON message validated against
   `.pigeon/handoff.schema.json`: sparse state deltas plus *pointers*, never
   payloads. Append-only under `.pigeon/handoffs/`.
@@ -144,7 +152,8 @@ schema_version: "1.0"          # config-format version (NOT the handoff schema)
 
 paths:
   canonical: AGENTS.md
-  generated: [CLAUDE.md, GEMINI.md]
+  generated: auto                        # detect installed CLIs (below), or an
+                                         #   explicit list to force specific files
   manifest: .pigeon/manifest.json
   handoffs_dir: .pigeon/handoffs
   metrics: .pigeon/metrics.jsonl

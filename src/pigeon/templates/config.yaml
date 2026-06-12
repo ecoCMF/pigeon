@@ -5,9 +5,11 @@ schema_version: "1.0"  # config-format version — NOT the handoff schema (see h
 
 paths:
   canonical: AGENTS.md
-  generated:
-    - CLAUDE.md
-    - GEMINI.md
+  # `auto`: generate a pointer file for each agent CLI found on PATH at
+  # refresh time (claude -> CLAUDE.md, gemini -> GEMINI.md; Codex/opencode/
+  # Copilot read AGENTS.md natively, so no file). Or pin an explicit list,
+  # e.g. [CLAUDE.md, GEMINI.md], to force files regardless of what's installed.
+  generated: auto
   manifest: .agentctx/manifest.json
   handoffs_dir: .agentctx/handoffs
   metrics: .agentctx/metrics.jsonl
