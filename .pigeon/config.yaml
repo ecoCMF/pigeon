@@ -1,0 +1,66 @@
+# agentctx configuration. Human-edited -> YAML is fine here.
+# The cross-model *contract* (handoffs) is strictly JSON; see AGENTS.md.
+# Anything omitted falls back to defaults in src/agentctx/config.py.
+schema_version: "1.0"  # config-format version — NOT the handoff schema
+
+paths:
+  canonical: AGENTS.md
+  generated:
+    - CLAUDE.md
+    - GEMINI.md
+  manifest: .pigeon/manifest.json
+  handoffs_dir: .pigeon/handoffs
+  metrics: .pigeon/metrics.jsonl
+  handoff_schema: .pigeon/handoff.schema.json
+
+manifest:
+  # Globs (relative to repo root) whose public interfaces get indexed.
+  include:
+    - "src/**/*.py"
+    - "*.py"
+  exclude:
+    - "**/__pycache__/**"
+  # Declarative project knowledge that cannot be auto-derived from code.
+  # Kept here so the manifest stays deterministic and reviewable.
+  decisions:
+    json_over_yaml: "Every model's tool-calling is JSON-trained; YAML whitespace is a cross-model failure mode."
+    graph_deferred: "Fast-churn repos waste a knowledge graph's LLM ingestion cost; revisit only for a stable core, gated on metrics."
+    pointers_not_payloads: "Separate CLIs share no memory; the contract is the filesystem. Handoffs carry pointers, resolved on demand."
+  owners:
+    agentctx: Camilo
+
+retrieval:
+  include:
+    - "**/*.py"
+    - "**/*.md"
+    - "**/*.json"
+    - "**/*.toml"
+    - "**/*.sh"
+  exclude:
+    - "**/__pycache__/**"
+    - ".git/**"
+    - ".venv/**"
+    - "venv/**"
+    - "**/*.egg-info/**"
+    - ".pigeon/metrics.jsonl"
+  max_file_bytes: 200000
+  chunk_lines: 40
+  chunk_overlap: 10
+  default_top_k: 5
+  # Path to the ripgrep binary. null -> AGENTCTX_RG env, then PATH.
+  ripgrep_path: null
+  # Vector retrieval is OFF by default (fast-churn repos). When enabled it
+  # uses a local embedding model + local store only — never cloud.
+  vector:
+    enabled: false
+    model: "all-MiniLM-L6-v2"
+    store_dir: ".pigeon/vector"
+
+resolve:
+  # s3:// pointers require this flag AND the optional [s3] extra.
+  allow_s3: false
+
+tokens:
+  # Used only if the optional [tokens] extra (tiktoken) is installed;
+  # otherwise a deterministic offline heuristic is used.
+  encoding: "cl100k_base"

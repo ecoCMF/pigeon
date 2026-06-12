@@ -1,0 +1,76 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pigeon"
+version = "0.1.0"
+description = "Carrier for cross-model agent context: canonical context, validated handoffs, parallel coordination, hybrid retrieval, distilled memory, token instrumentation. Formerly agentctx: canonical context, validated handoffs, hybrid retrieval, token instrumentation."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Camilo" }]
+keywords = ["agents", "llm", "context-engineering", "handoff", "retrieval"]
+
+# Pinned (compatible-release) runtime deps. Kept to the minimum the
+# acceptance checks require. ripgrep is shelled out, not a Python dep.
+dependencies = [
+    "jsonschema~=4.21",
+    "rank-bm25~=0.2.2",
+    "PyYAML~=6.0",
+]
+
+[project.optional-dependencies]
+# Exact GPT tokenization. Without it, tokens.py uses a deterministic
+# offline heuristic, so this is opt-in for byte-accurate counts.
+tokens = ["tiktoken~=0.7"]
+# Local vector retrieval (off by default; see .agentctx/config.yaml).
+# No cloud: a local embedding model + a local store.
+vector = ["chromadb~=0.5"]
+# `pigeon mcp`: serve the contract over the Model Context Protocol so CLI
+# agents (Claude Code, Codex, Gemini CLI, ...) call it as native tools.
+mcp = ["mcp~=1.2"]
+# `pigeon status --tui`: full-screen terminal dashboard (reader-only).
+tui = ["textual~=8.0"]
+dev = ["pytest~=8.0", "mcp~=1.2", "textual~=8.0"]
+
+[project.urls]
+Homepage = "https://github.com/ecoCMF/pigeon"
+Repository = "https://github.com/ecoCMF/pigeon"
+Issues = "https://github.com/ecoCMF/pigeon/issues"
+
+[project.scripts]
+pigeon = "pigeon.cli:main"
+# legacy alias — the old name is deployed in existing projects
+agentctx = "pigeon.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+pigeon = ["py.typed", "templates/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.pyrefly]
+project-includes = ["src", "tests"]
+project-excludes = ["**/.venv", "**/__pycache__", "**/.pigeon", "**/.agentctx"]
+# Optional extras are imported lazily behind friendly install hints
+# (tokens.py / retrieval.py / mcp_server.py / tui.py); absence is a
+# supported configuration, not a type error.
+replace-imports-with-any = ["tiktoken", "chromadb", "boto3",
+                            "tiktoken.*", "chromadb.*", "boto3.*"]
+
+# Tests exercise dynamic JSON shapes and **kwargs helpers on purpose;
+# keep src/ strict, relax only the inference-limit kinds in tests/.
+[[tool.pyrefly.sub-config]]
+matches = "tests/**"
+
+[tool.pyrefly.sub-config.errors]
+bad-index = false
+bad-argument-type = false
+unsupported-operation = false
+missing-attribute = false   # MCP content unions, Optional[Match] in asserts
+not-iterable = false        # `in` checks on manifest fields that may be None

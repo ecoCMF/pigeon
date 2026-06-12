@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentctx.dev/schemas/handoff-1.1.json",
+  "title": "AgentHandoff",
+  "description": "Cross-model agent handoff: sparse state deltas plus pointers, never payloads.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "sid",
+    "from",
+    "to",
+    "state"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+$",
+      "description": "Handoff contract version, e.g. \"1.0\"."
+    },
+    "sid": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Session id grouping a chain of handoffs."
+    },
+    "from": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Sending agent/role."
+    },
+    "to": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Receiving agent/role."
+    },
+    "state": {
+      "type": "object",
+      "required": [
+        "done",
+        "doing"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "done": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Completed steps (deltas, not full history)."
+        },
+        "doing": {
+          "type": "string",
+          "description": "The single step the receiver should take next."
+        },
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Pointers (repo://, file://, s3://, or a path) — resolved on demand, never inlined."
+        },
+        "decisions": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Key decisions carried forward, e.g. {\"auth_flow\": \"oauth2_pkce\"}."
+        }
+      }
+    },
+    "rag": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "query": {
+          "type": "string"
+        },
+        "top_k": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "description": "Optional retrieval hint for the receiver."
+    },
+    "constraints": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Freeform constraints, e.g. {\"max_tokens\": 8000, \"fail_fast\": true}."
+    },
+    "crew": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Deterministic staffing for the receiving agent: which skills to load and which subagents to dispatch. Names resolve against the shared knowledge tree (playbooks).",
+      "properties": {
+        "skills": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Skill/playbook names the agent itself must load.",
+          "minItems": 1
+        },
+        "subagents": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "role"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "role": {
+                "type": "string",
+                "minLength": 1
+              },
+              "skill": {
+                "type": "string",
+                "description": "Skill/playbook the subagent loads."
+              },
+              "doing": {
+                "type": "string",
+                "description": "The subagent's single step."
+              },
+              "verdict": {
+                "type": "string",
+                "description": "Gate, e.g. 'must approve before hand-back'."
+              }
+            }
+          },
+          "description": "Roster the agent must dispatch via its own subagent mechanism.",
+          "minItems": 1
+        }
+      }
+    },
+    "context_ref": {
+      "type": "string",
+      "description": "Logical pointer into the shared store, e.g. \"manifest@HEAD\"."
+    }
+  }
+}

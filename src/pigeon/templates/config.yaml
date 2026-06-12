@@ -1,0 +1,66 @@
+# agentctx configuration (created by `agentctx init`). Human-edited -> YAML.
+# The cross-model *contract* (handoffs) is strictly JSON; see AGENTS.md.
+# Anything omitted falls back to built-in defaults.
+schema_version: "1.0"  # config-format version — NOT the handoff schema (see handoff.schema.json $id)
+
+paths:
+  canonical: AGENTS.md
+  generated:
+    - CLAUDE.md
+    - GEMINI.md
+  manifest: .agentctx/manifest.json
+  handoffs_dir: .agentctx/handoffs
+  metrics: .agentctx/metrics.jsonl
+  handoff_schema: .agentctx/handoff.schema.json
+
+manifest:
+  # Globs (relative to repo root) whose public interfaces get indexed.
+  # TODO: adjust to your layout (e.g. app/**/*.py, services/**/*.py).
+  include:
+    - "src/**/*.py"
+    - "*.py"
+  exclude:
+    - "**/__pycache__/**"
+    - "tests/**"
+  # Declarative knowledge that cannot be auto-derived from code.
+  # TODO: record your real decisions and owners here.
+  decisions: {}
+  owners: {}
+
+retrieval:
+  include:
+    - "**/*.py"
+    - "**/*.md"
+    - "**/*.json"
+    - "**/*.toml"
+    - "**/*.yaml"
+    - "**/*.yml"
+    - "**/*.sql"
+    - "**/*.sh"
+  exclude:
+    - "**/__pycache__/**"
+    - ".git/**"
+    - ".venv/**"
+    - "venv/**"
+    - "node_modules/**"
+    - "**/*.egg-info/**"
+    - ".agentctx/metrics.jsonl"
+  max_file_bytes: 200000
+  chunk_lines: 40
+  chunk_overlap: 10
+  default_top_k: 5
+  # Path to the ripgrep binary. null -> AGENTCTX_RG env, then PATH.
+  ripgrep_path: null
+  # Vector retrieval is OFF by default (fast-churn repos). Local-only when on.
+  vector:
+    enabled: false
+    model: "all-MiniLM-L6-v2"
+    store_dir: ".agentctx/vector"
+
+resolve:
+  # s3:// pointers require this flag AND the optional [s3] extra (boto3).
+  allow_s3: false
+
+tokens:
+  # Used only if the optional [tokens] extra (tiktoken) is installed.
+  encoding: "cl100k_base"
