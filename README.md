@@ -108,6 +108,13 @@ coordinate:
   default_runner: [agy, opencode]   # claude only where a task asks for it
 ```
 
+Mark review/audit tasks `readonly: true` — pigeon injects a hard read-only
+constraint *and* runs them in a worktree by default, so a contract violation
+(an agent or its subagent writing anyway) is contained to a throwaway branch,
+never the working tree. `pigeon refresh` also upgrades a stale on-disk
+`handoff.schema.json` in place, so repos scaffolded under older releases
+accept current handoff fields like `crew`.
+
 Cost containment is layered: `--budget-tokens/--budget-usd` are hard
 ceilings but count **measured** spend — pair them with `--telemetry` (or
 per-task `telemetry: true`) or they cannot see untracked runners. How an agent

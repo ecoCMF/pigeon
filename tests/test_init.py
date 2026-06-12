@@ -58,3 +58,24 @@ def test_packaged_schema_matches_committed():
     packaged = files("pigeon").joinpath("templates", "handoff.schema.json").read_text(encoding="utf-8")
     committed = (Path(__file__).resolve().parents[1] / ".pigeon" / "handoff.schema.json").read_text(encoding="utf-8")
     assert packaged == committed
+
+
+# --------------------------------------------------- schema upgrade (live fix)
+def test_upgrade_schema_bumps_a_stale_handoff_schema(repo):
+    from pigeon import init as init_mod
+    # simulate a repo scaffolded under agentctx 1.0: rewrite the $id to 1.0
+    schema = repo.handoff_schema
+    text = schema.read_text(encoding="utf-8").replace("handoff-1.1.json", "handoff-1.0.json")
+    schema.write_text(text, encoding="utf-8")
+    note = init_mod.upgrade_schema(repo)
+    assert note and "1.0 -> 1.1" in note
+    assert "handoff-1.1.json" in schema.read_text(encoding="utf-8")
+    # idempotent: a current schema is left alone
+    assert init_mod.upgrade_schema(repo) is None
+
+
+def test_upgrade_schema_writes_a_missing_one(repo):
+    repo.handoff_schema.unlink()
+    note = init_mod.upgrade_schema(repo)
+    assert note and "wrote missing" in note
+    assert repo.handoff_schema.is_file()

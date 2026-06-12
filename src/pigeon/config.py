@@ -116,9 +116,14 @@ def default_config(contract_dir: str = LEGACY_CONTRACT_DIR) -> dict[str, Any]:
             # Appended with --telemetry (or per-task `telemetry: true`): makes the
             # child CLI emit a machine-readable usage report we mine for *measured*
             # token consumption. Output with a `usage` object is parsed regardless.
+            # Appended with --telemetry / per-task telemetry: true. Only a
+            # runner whose CLI actually emits a usage report should get a
+            # flag here — a wrong flag makes the runner print help and exit.
+            # claude -p --output-format json is verified; add your runner's
+            # real usage flag (agy/opencode have none by default).
             "telemetry_flags": {
                 "claude": ["--output-format", "json"],
-                "agy": ["--output-format", "json"],
+                "agy": [],
                 "opencode": [],
             },
             # Strict mode: when set, only these env vars (plus a functional

@@ -106,6 +106,8 @@ tasks:
     pack: true                # attach a packed context bundle to the handoff
     pack_max_tokens: 4000
     telemetry: true           # append runner's JSON flags; record measured tokens
+    readonly: true            # no writes: hard read-only constraint + worktree
+                              #   containment by default (override with isolation:)
     mutates_packages: false   # true => requires conda env / venv / container
     prompt: "..."             # override the default prompt template
     crew:                     # deterministic staffing (handoff schema 1.1)
@@ -189,9 +191,9 @@ coordinate:
     agy:    [--dangerously-skip-permissions]
     opencode: []
   telemetry_flags:                       # appended with --telemetry / telemetry: true
-    claude: [--output-format, json]
-    agy:    [--output-format, json]
-    opencode: []
+    claude: [--output-format, json]      # only verified runner; a wrong flag
+    agy:    []                           #   makes a runner print help and exit
+    opencode: []                         # add YOUR runner's real usage flag
   env_allowlist: null                    # list => strict env for children (+ PATH/HOME baseline)
   budget: {tokens: null, usd: null}      # default hard ceilings (measured spend)
   safety:
@@ -324,6 +326,15 @@ Cost (layered, all opt-in but strongly recommended together):
 How an agent staffs its work internally is its own judgment; contract a
 `crew:` when you want staffing decided deterministically.
 
+**Read-only / untrusted tasks.** A prompt-level "don't modify files" is
+*soft* — an agent or one of its subagents can ignore it (and will, given a
+plausible reason). The only *hard* guarantee is `isolation: worktree`, where
+every write lands on a disposable branch and never the working tree. Declare
+`readonly: true` and pigeon does both: injects the read-only constraint
+*and* defaults the task to a worktree (override with explicit
+`isolation: shared` only if you accept the risk). Review, audit, and
+analysis tasks should always be `readonly: true`.
+
 ## 11. Recipes
 
 **Spread load off the metered CLI:**
@@ -367,6 +378,9 @@ removed (branches kept), history bounded.
 | Exit 1 with `skipped` tasks | Check `skipped_because` in `pigeon status` — a failed dependency or an exhausted budget. |
 | Budget never trips | Budgets count *measured* spend — enable telemetry. |
 | `mutates_packages` refused | Run inside a conda env/venv/container; detection uses env vars that children inherit. |
+| Handoffs with `crew:` rejected as invalid | Your repo's `handoff.schema.json` predates the field — run `pigeon refresh`, which upgrades a strictly-older schema in place. |
+| A runner prints its help and exits under `--telemetry` | That runner has no JSON-usage flag; set `coordinate.telemetry_flags.<runner>: []` (default for agy/opencode). |
+| A "read-only" task edited files anyway | Prompt constraints are soft. Mark it `readonly: true` (auto-worktree containment) or set `isolation: worktree`. |
 | Failed task, cause unclear | `pigeon status` shows the log tail under the task; full log path is in the manifest. |
 | Coordinator crashed (OOM/SIGKILL) | `pigeon cleanup` — worktrees reconciled, branches preserved. |
 | MCP tools absent after `claude mcp add` | Servers connect at session startup — restart the session. |

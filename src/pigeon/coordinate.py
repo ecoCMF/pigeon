@@ -22,6 +22,8 @@ Tasks file shape::
         pack: true                # attach a packed context bundle to the handoff
         mutates_packages: false   # true => requires an isolated environment
         telemetry: true           # append JSON-output flags; record measured tokens
+        readonly: true            # no writes: hard read-only constraint +
+                                  #   worktree containment (unless isolation set)
         isolation: worktree       # run in a throwaway git worktree + task branch
         crew:                     # deterministic staffing, carried in the handoff
           skills: [advanced-python-backend]
@@ -91,6 +93,17 @@ SAFETY_CONSTRAINTS: dict[str, str] = {
     "escalation": (
         "if a step would violate a constraint, stop and hand back to "
         f"'{COORDINATOR}' instead of proceeding"
+    ),
+}
+
+# Overrides fs_scope for readonly tasks. Soft (prompt-level) — the hard
+# guarantee is the worktree isolation a readonly task gets by default.
+READONLY_CONSTRAINTS: dict[str, str] = {
+    "fs_scope": (
+        "READ-ONLY TASK: do not create, modify, move, or delete any file, and "
+        "instruct every subagent you dispatch to do the same — produce findings "
+        "and a hand-back only. If a step seems to require a write, stop and hand "
+        f"back to '{COORDINATOR}'."
     ),
 }
 
@@ -177,6 +190,14 @@ def load_tasks(path: Path,
             raise ValueError(
                 f"task {tid!r}: 'isolation' must be 'shared' or 'worktree'"
             )
+        if "readonly" in task and not isinstance(task["readonly"], bool):
+            raise ValueError(f"task {tid!r}: 'readonly' must be true or false")
+        # A read-only task gets hard containment by default: a prompt-level
+        # "don't write" is soft (an agent or its subagent can ignore it), so
+        # unless isolation is set explicitly, run it in a throwaway worktree —
+        # a contract violation lands on a disposable branch, not the tree.
+        if task.get("readonly") and task.get("isolation") is None:
+            task["isolation"] = "worktree"
         crew = task.get("crew")
         if crew is not None:
             if not isinstance(crew, dict):
@@ -391,6 +412,8 @@ def _task_badges(task: dict[str, Any]) -> str:
     n_crew = len(crew.get("subagents", [])) + len(crew.get("skills", []))
     if n_crew:
         badges.append(f"crew×{n_crew}")
+    if task.get("readonly"):
+        badges.append("readonly")
     for flag in ("isolation", "pack", "telemetry", "mutates_packages"):
         if task.get(flag):
             badges.append("worktree" if flag == "isolation" else flag)
@@ -417,6 +440,7 @@ def plan(config: Config, spec: dict[str, Any]) -> dict[str, Any]:
                 "pack": bool(t.get("pack")),
                 "telemetry": bool(t.get("telemetry")),
                 "mutates_packages": bool(t.get("mutates_packages")),
+                "readonly": bool(t.get("readonly")),
                 **({"crew": t["crew"]} if t.get("crew") else {}),
             }
             for t in tasks
@@ -1194,7 +1218,9 @@ def run_coordinate(
             artifacts=artifacts or None,
             decisions=task.get("decisions") or None,
             rag=task.get("rag") or None,
-            constraints={**SAFETY_CONSTRAINTS, **(task.get("constraints") or {})},
+            constraints={**SAFETY_CONSTRAINTS,
+                         **(READONLY_CONSTRAINTS if task.get("readonly") else {}),
+                         **(task.get("constraints") or {})},
             crew=task.get("crew") or None,
             context_ref=task.get("context_ref", "manifest@HEAD"),
         )

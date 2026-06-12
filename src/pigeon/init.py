@@ -7,6 +7,7 @@ install — not just from a checkout of pigeon itself.
 
 from __future__ import annotations
 
+import re
 from importlib.resources import files
 from pathlib import Path
 
@@ -149,3 +150,37 @@ def init_repo(
     if with_hook:
         _install_hook(root, actions, force=force)
     return actions
+
+
+_SCHEMA_VER_RE = re.compile(r"handoff-(\d+)\.(\d+)\.json")
+
+
+def _schema_version(text: str) -> tuple[int, int] | None:
+    """Parse the (major, minor) handoff-schema version from its ``$id``."""
+    match = _SCHEMA_VER_RE.search(text)
+    return (int(match.group(1)), int(match.group(2))) if match else None
+
+
+def upgrade_schema(config) -> str | None:
+    """Repair/upgrade the on-disk handoff schema toward the bundled version.
+
+    A repo scaffolded under an older release keeps its schema forever (init
+    is idempotent), so a 1.0 schema silently rejects newer handoff fields
+    such as ``crew``. ``refresh`` calls this: a missing schema is written, a
+    strictly-older one is upgraded, an equal-or-newer (or hand-customized)
+    one is left alone. Returns a human-readable note, or None if unchanged.
+    """
+    bundled = _template("handoff.schema.json")
+    target = config.handoff_schema
+    rel = target.relative_to(config.root)
+    if not target.is_file():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(bundled, encoding="utf-8")
+        return f"wrote missing handoff schema -> {rel}"
+    on_disk = _schema_version(target.read_text(encoding="utf-8"))
+    new = _schema_version(bundled)
+    if on_disk is None or new is None or on_disk >= new:
+        return None
+    target.write_text(bundled, encoding="utf-8")
+    return (f"upgraded handoff schema {on_disk[0]}.{on_disk[1]} -> "
+            f"{new[0]}.{new[1]}  ({rel})")

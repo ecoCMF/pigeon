@@ -937,3 +937,44 @@ def test_config_default_runner_reaches_run_and_plan(repo, capsys):
     assert co.run_coordinate(tasks, cfg, dry_run=True) == 0
     run = co.list_runs(cfg, sid="co1")[0]
     assert run["tasks"]["a"]["runner"] == "py"
+
+
+# ---------------------------------------------------------- live-testing fixes
+def test_agy_telemetry_flag_is_empty_by_default(repo):
+    # agy has no --output-format json; a wrong flag makes it print-help-and-exit
+    flags = repo.coordinate_cfg["telemetry_flags"]
+    assert flags["agy"] == []
+    assert flags["opencode"] == []
+    assert flags["claude"] == ["--output-format", "json"]
+
+
+def test_readonly_defaults_to_worktree_containment(repo):
+    spec = co.load_tasks(_write_tasks(repo.root, _spec(tasks=[
+        {"id": "review", "runner": "py", "doing": "audit the diff", "readonly": True},
+        {"id": "shared", "runner": "py", "doing": "x", "readonly": True,
+         "isolation": "shared"},  # explicit opt-out is honored
+    ])))
+    by_id = {t["id"]: t for t in spec["tasks"]}
+    assert by_id["review"]["isolation"] == "worktree"   # containment by default
+    assert by_id["shared"]["isolation"] == "shared"     # informed opt-out
+
+
+def test_readonly_injects_hard_constraint_and_badge(repo):
+    cfg = _setup(repo)
+    tasks = _write_tasks(repo.root, _spec(tasks=[
+        {"id": "review", "runner": "py", "doing": "x", "readonly": True,
+         "isolation": "shared"}]))  # shared so we can read the handoff easily
+    assert co.run_coordinate(tasks, cfg, dry_run=True) == 0
+    h = ho.load_handoff(next(cfg.handoffs_dir.glob("co1-*.json")), cfg)
+    assert "READ-ONLY TASK" in h["constraints"]["fs_scope"]
+    assert "every subagent you dispatch to do the same" in h["constraints"]["fs_scope"]
+    # plan surfaces it
+    spec = co.load_tasks(_write_tasks(repo.root, _spec(tasks=[
+        {"id": "r", "runner": "py", "doing": "x", "readonly": True}])))
+    assert "readonly" in co.format_plan(co.plan(cfg, spec), spec["tasks"])
+
+
+def test_readonly_must_be_bool(repo):
+    with pytest.raises(ValueError, match="readonly"):
+        co.load_tasks(_write_tasks(repo.root, _spec(tasks=[
+            {"id": "a", "runner": "py", "doing": "x", "readonly": "yes"}])))

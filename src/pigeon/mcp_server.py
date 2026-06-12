@@ -211,11 +211,16 @@ def graph_query_impl(config: Config, query: str | None = None,
 def refresh_impl(config: Config) -> dict[str, Any]:
     """Rebuild manifest, pointer files, and projected runtime skill files."""
     from . import skills as skills_mod
+    from . import init as init_mod
+    schema_note = init_mod.upgrade_schema(config)
     path = manifest.write_manifest(config)
     synced = [str(p.relative_to(config.root)) for p in context.sync_context(config)]
     projected = skills_mod.project_skills(config)
-    return {"manifest": str(path.relative_to(config.root)), "synced": synced,
-            "skills": projected}
+    out = {"manifest": str(path.relative_to(config.root)), "synced": synced,
+           "skills": projected}
+    if schema_note:
+        out["schema"] = schema_note
+    return out
 
 
 # --------------------------------------------------------------- MCP wiring

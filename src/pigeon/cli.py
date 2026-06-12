@@ -79,6 +79,9 @@ def cmd_init(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------- refresh
 def cmd_refresh(args: argparse.Namespace) -> int:
     cfg = _cfg(args)
+    note = init_mod.upgrade_schema(cfg)
+    if note:
+        print(f"schema:   {note}")
     path = manifest.write_manifest(cfg)
     print(f"manifest: {path.relative_to(cfg.root)}")
     for p in context.sync_context(cfg):
