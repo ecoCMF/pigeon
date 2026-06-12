@@ -133,11 +133,7 @@ def default_config(contract_dir: str = LEGACY_CONTRACT_DIR) -> dict[str, Any]:
                 # pip install/remove & library changes only inside a conda env,
                 # virtualenv, or container — never the system interpreter.
                 "require_isolated_env_for_packages": True,
-                # Soft brake on internal fan-out: adds a handoff constraint
-            # telling agents to dispatch only the contracted crew (if any),
-            # not improvised subagent swarms. Prompt-level, defense in depth.
-            "restrain_subagents": True,
-            # Children inherit AGENTCTX_DEPTH; a child running `coordinate`
+                # Children inherit AGENTCTX_DEPTH; a child running `coordinate`
                 # again past this depth is refused (no agent fork-bombs).
                 "max_depth": 1,
             },

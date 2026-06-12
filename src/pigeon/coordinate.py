@@ -1194,15 +1194,7 @@ def run_coordinate(
             artifacts=artifacts or None,
             decisions=task.get("decisions") or None,
             rag=task.get("rag") or None,
-            constraints={**SAFETY_CONSTRAINTS,
-                         **({"subagents": (
-                             "dispatch only the subagents contracted in this "
-                             "handoff's crew (none contracted = none spawned); "
-                             "do not fan out additional subagents — spend is "
-                             "metered")}
-                            if ccfg.get("safety", {}).get("restrain_subagents", True)
-                            else {}),
-                         **(task.get("constraints") or {})},
+            constraints={**SAFETY_CONSTRAINTS, **(task.get("constraints") or {})},
             crew=task.get("crew") or None,
             context_ref=task.get("context_ref", "manifest@HEAD"),
         )

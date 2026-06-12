@@ -937,24 +937,3 @@ def test_config_default_runner_reaches_run_and_plan(repo, capsys):
     assert co.run_coordinate(tasks, cfg, dry_run=True) == 0
     run = co.list_runs(cfg, sid="co1")[0]
     assert run["tasks"]["a"]["runner"] == "py"
-
-
-def test_restrain_subagents_constraint_default_on(repo):
-    cfg = _setup(repo)
-    tasks = _write_tasks(repo.root, _spec(tasks=[{"id": "a", "runner": "py", "doing": "x"}]))
-    assert co.run_coordinate(tasks, cfg, dry_run=True) == 0
-    h = ho.load_handoff(next(cfg.handoffs_dir.glob("co1-*.json")), cfg)
-    assert "do not fan out additional subagents" in h["constraints"]["subagents"]
-
-
-def test_restrain_subagents_can_be_disabled(repo):
-    import yaml as _yaml
-    (repo.root / ".git").mkdir(exist_ok=True)
-    (repo.root / ".agentctx" / "config.yaml").write_text(_yaml.safe_dump({
-        "coordinate": {"runners": {"py": _PY_OK},
-                       "safety": {"restrain_subagents": False}}}), encoding="utf-8")
-    cfg = load_config(repo.root)
-    tasks = _write_tasks(repo.root, _spec(tasks=[{"id": "a", "runner": "py", "doing": "x"}]))
-    assert co.run_coordinate(tasks, cfg, dry_run=True) == 0
-    h = ho.load_handoff(next(cfg.handoffs_dir.glob("co1-*.json")), cfg)
-    assert "subagents" not in h["constraints"]

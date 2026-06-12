@@ -109,9 +109,10 @@ coordinate:
 
 Cost containment is layered: `--budget-tokens/--budget-usd` are hard
 ceilings but count **measured** spend — pair them with `--telemetry` (or
-per-task `telemetry: true`) or they cannot see untracked runners. Every
-handoff also carries a `subagents` constraint ("dispatch only the
-contracted crew") unless `safety.restrain_subagents: false`.
+per-task `telemetry: true`) or they cannot see untracked runners. How an agent
+staffs its work internally is its own judgment — contract a `crew:` when
+you want that decided deterministically, and use budgets + telemetry as
+the spend backstop.
 
 Tasks may declare `needs: [other-id]` — an acyclic dependency graph. A task
 launches once everything it needs has exited 0; everything downstream of a
