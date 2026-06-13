@@ -65,3 +65,43 @@ tokens:
   # Used only if the optional [tokens] extra (tiktoken) is installed;
   # otherwise a deterministic offline heuristic is used.
   encoding: "cl100k_base"
+
+# --- multi-model "army" runners (added for the model-army brainstorm) ---------
+# A runner is just an argv template keyed by an arbitrary name; the binary is
+# template[0]. So one (CLI, model) pair = one runner. Free opencode models do
+# the heavy generation; Sonnet + agy gate; Opus renders the verdict.
+# {prompt} is quoted so YAML doesn't read it as a flow mapping.
+#
+# RELIABILITY HARDENING (after a 5.6h stall):
+#   * opencode keeps a single shared SQLite DB (~/.local/share/opencode/
+#     opencode.db, WAL). Concurrent army instances contend on its lock ->
+#     "database is locked" -> the army hangs. FIX: each opencode runner gets its
+#     OWN XDG_DATA_HOME (its own opencode.db) under /tmp/pigeon-oc/<runner>/,
+#     pre-seeded with auth.json + account.json so auth still works. No lock,
+#     full parallelism restored.
+#   * EVERY runner is wrapped in `timeout -k 30 <secs>`: a hung child dies on
+#     its own (SIGTERM, then SIGKILL 30s later) instead of orphaning for hours.
+#     Per-runner timeouts are reliable where the prior outer `timeout pigeon ...`
+#     wrapper orphaned its children.
+#   * All numeric args are quoted strings: _fill() runs str.replace on every
+#     template arg, so a bare int would crash.
+#   * All 7 runners are defined explicitly (incl. agy) so the run is correct
+#     whether project config merges over or replaces the defaults.
+coordinate:
+  parallel_limit: 4
+  runners:
+    oc-nemotron: [timeout, "-k", "30", "600", env, "XDG_DATA_HOME=/tmp/pigeon-oc/oc-nemotron", opencode, run, -m, opencode/nemotron-3-ultra-free, "{prompt}"]
+    oc-deepseek: [timeout, "-k", "30", "600", env, "XDG_DATA_HOME=/tmp/pigeon-oc/oc-deepseek", opencode, run, -m, opencode/deepseek-v4-flash-free, "{prompt}"]
+    oc-mimo:     [timeout, "-k", "30", "600", env, "XDG_DATA_HOME=/tmp/pigeon-oc/oc-mimo", opencode, run, -m, opencode/mimo-v2.5-free, "{prompt}"]
+    oc-north:    [timeout, "-k", "30", "600", env, "XDG_DATA_HOME=/tmp/pigeon-oc/oc-north", opencode, run, -m, opencode/north-mini-code-free, "{prompt}"]
+    sonnet:      [timeout, "-k", "30", "900", claude, -p, "{prompt}", --model, sonnet]
+    opus:        [timeout, "-k", "30", "1800", claude, -p, "{prompt}", --model, opus]
+    agy:         [timeout, "-k", "30", "900", agy, -p, "{prompt}"]
+  skip_permissions_flags:
+    oc-nemotron: []
+    oc-deepseek: []
+    oc-mimo: []
+    oc-north: []
+    sonnet: [--dangerously-skip-permissions]
+    opus: [--dangerously-skip-permissions]
+    agy: [--dangerously-skip-permissions]
