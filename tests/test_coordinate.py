@@ -1085,3 +1085,35 @@ def test_plan_and_badges_surface_resolved_model(repo):
     p = co.plan(cfg, spec)
     assert p["tasks"]["a"]["model"] == "prov/xl"
     assert "model=prov/xl" in co.format_plan(p, spec["tasks"])
+
+
+# --------------------------------------------- Phase B: diff materialization
+def test_worktree_materializes_full_diff_on_shared_tree(repo):
+    cfg = _setup(repo, runners={
+        "writer": [sys.executable, "-c", "open('out_{task_id}.txt','w').write('made')"],
+    })
+    _real_git(repo.root)
+    tasks = _write_tasks(repo.root, _spec(tasks=[
+        {"id": "iso", "runner": "writer", "doing": "x", "isolation": "worktree"}]))
+    assert co.run_coordinate(tasks, cfg) == 0
+    run = co.list_runs(cfg, sid="co1")[0]
+    diff_rel = run["tasks"]["iso"]["isolation"]["diff"]
+    assert "co1-1" in diff_rel                       # under diffs/<run_id>/
+    diff_path = repo.root / diff_rel
+    assert diff_path.is_file()                       # survives `worktree remove`
+    body = diff_path.read_text(encoding="utf-8")
+    assert "out_iso.txt" in body and "+made" in body  # a real unified diff
+
+
+def test_by_agent_report_adds_by_model_rollup():
+    run = {"run_id": "r1", "tasks": {
+        "a": {"runner": "oc", "model": "m1", "status": "completed",
+              "duration_s": 1.0, "telemetry": {"total_tokens": 10}},
+        "b": {"runner": "oc", "model": "m2", "status": "failed"},
+        "c": {"runner": "py", "status": "completed"},  # no model -> not in rollup
+    }}
+    report = co.by_agent_report(run)
+    assert "by model:" in report
+    by_model = report.split("by model:", 1)[1]
+    assert "m1" in by_model and "m2" in by_model
+    assert "py" not in by_model  # model-less runner stays out of the model rollup

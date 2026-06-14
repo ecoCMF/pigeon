@@ -619,6 +619,8 @@ class RunRecorder:
                 t["id"]: {
                     "runner": t["runner"],
                     "status": "queued",
+                    "doing": t.get("doing", ""),
+                    **({"model": t["model"]} if t.get("model") else {}),
                     **({"needs": list(t["needs"])} if t.get("needs") else {}),
                     **({"crew": t["crew"]} if t.get("crew") else {}),
                 }
@@ -792,11 +794,15 @@ def timeline_report(config: Config, run: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def by_agent_report(run: dict[str, Any]) -> str:
-    """Per-runner aggregation: who is loaded, who fails, who burns budget."""
+def _aggregate_tasks(run: dict[str, Any], key: str) -> dict[str, dict[str, Any]]:
+    """Roll up tasks by a manifest field (``runner`` or ``model``). Tasks with
+    no value for ``key`` are skipped (so model rollup covers only model tasks)."""
     agg: dict[str, dict[str, Any]] = {}
-    for tid, t in (run.get("tasks") or {}).items():
-        a = agg.setdefault(t.get("runner", "?"), {
+    for _tid, t in (run.get("tasks") or {}).items():
+        bucket = t.get(key)
+        if bucket is None:
+            continue
+        a = agg.setdefault(bucket, {
             "tasks": 0, "ok": 0, "failed": 0, "skipped": 0,
             "duration_s": 0.0, "tokens": 0, "cost_usd": 0.0,
         })
@@ -812,15 +818,34 @@ def by_agent_report(run: dict[str, Any]) -> str:
         telemetry = t.get("telemetry") or {}
         a["tokens"] += int(telemetry.get("total_tokens") or 0)
         a["cost_usd"] += float(telemetry.get("total_cost_usd") or 0)
-    lines = [f"agents: {run['run_id']}"]
-    for runner in sorted(agg):
-        a = agg[runner]
-        line = (f"  {runner:<12} tasks={a['tasks']}  ok={a['ok']} "
+    return agg
+
+
+def _agg_lines(agg: dict[str, dict[str, Any]]) -> list[str]:
+    lines = []
+    for name in sorted(agg):
+        a = agg[name]
+        line = (f"  {name:<12} tasks={a['tasks']}  ok={a['ok']} "
                 f"failed={a['failed']} skipped={a['skipped']}  "
                 f"busy={round(a['duration_s'], 1)}s")
         if a["tokens"]:
             line += f"  tokens={a['tokens']} (measured)  cost=${round(a['cost_usd'], 4)}"
         lines.append(line)
+    return lines
+
+
+def by_agent_report(run: dict[str, Any]) -> str:
+    """Per-runner aggregation: who is loaded, who fails, who burns budget.
+
+    When tasks resolved a model, a parallel ``by model:`` rollup is appended —
+    the empirical record of which model did which work (Pillar 4's read-only
+    feedback; the coordinator never re-sorts pools on it)."""
+    lines = [f"agents: {run['run_id']}"]
+    lines += _agg_lines(_aggregate_tasks(run, "runner"))
+    model_agg = _aggregate_tasks(run, "model")
+    if model_agg:
+        lines.append("by model:")
+        lines += _agg_lines(model_agg)
     return "\n".join(lines)
 
 
@@ -990,7 +1015,7 @@ def _worktree_setup(config: Config, run_id: str, task_id: str) -> tuple[Path, st
 
 
 def _worktree_finish(
-    config: Config, task_id: str, wt_dir: Path, branch: str,
+    config: Config, task_id: str, wt_dir: Path, branch: str, run_id: str = "",
 ) -> tuple[dict[str, Any], list[str]]:
     """Harvest handoffs, commit the task's work to its branch, remove the tree.
 
@@ -1019,11 +1044,13 @@ def _worktree_finish(
             harvested.append(str(dest.relative_to(config.root)))
 
     with _GIT_LOCK:
-        return _worktree_commit_and_remove(config, task_id, wt_dir, branch, harvested)
+        return _worktree_commit_and_remove(
+            config, task_id, wt_dir, branch, harvested, run_id)
 
 
 def _worktree_commit_and_remove(
     config: Config, task_id: str, wt_dir: Path, branch: str, harvested: list[str],
+    run_id: str = "",
 ) -> tuple[dict[str, Any], list[str]]:
     changed = bool(_git(wt_dir, "status", "--porcelain").stdout.strip())
     info: dict[str, Any] = {"branch": branch, "changed": changed}
@@ -1035,6 +1062,16 @@ def _worktree_commit_and_remove(
         info["diffstat"] = _git(
             wt_dir, "diff", "--stat", "HEAD~1", "HEAD", check=False
         ).stdout.strip()
+        # Materialize the FULL diff onto the shared tree (config.root), not the
+        # worktree — it must outlive `worktree remove` so a downstream review
+        # task can receive it as a pointer (pointers-not-payloads).
+        full = _git(wt_dir, "diff", "HEAD~1", "HEAD", check=False).stdout
+        if full.strip():
+            diff_dir = config.coordinate_diffs_dir / (run_id or "run")
+            diff_dir.mkdir(parents=True, exist_ok=True)
+            diff_path = diff_dir / f"{task_id}.diff"
+            diff_path.write_text(full, encoding="utf-8")
+            info["diff"] = str(diff_path.relative_to(config.root))
     _git(config.root, "worktree", "remove", "--force", str(wt_dir))
     if not changed:
         _git(config.root, "branch", "-D", branch, check=False)
@@ -1341,8 +1378,7 @@ def run_coordinate(
         log_path = log_root / f"{sid}-{task['id']}.log"
         log_rel = str(log_path.relative_to(config.root)) \
             if log_path.is_relative_to(config.root) else str(log_path)
-        recorder.task(task["id"], command=cmd, handoff=rel, log=log_rel,
-                      **({"model": task["model"]} if task.get("model") else {}))
+        recorder.task(task["id"], command=cmd, handoff=rel, log=log_rel)
         recorder.event("handoff.dispatched", task=task["id"], handoff=rel)
         commands.append((task, cmd, log_path))
 
@@ -1378,7 +1414,7 @@ def run_coordinate(
                        model=task.get("model") or "", cwd=wt_dir, budget=budget,
                        procs=running_procs)
         try:
-            info, harvested = _worktree_finish(config, tid, wt_dir, branch)
+            info, harvested = _worktree_finish(config, tid, wt_dir, branch, run_id)
         except RuntimeError as exc:
             with _print_lock:
                 print(f"[{tid}] worktree teardown failed: {exc}")

@@ -92,6 +92,10 @@ def default_config(contract_dir: str = LEGACY_CONTRACT_DIR) -> dict[str, Any]:
             "runs_dir": f"{d}/coordinate/runs",
             "events_dir": f"{d}/coordinate/events",
             "worktrees_dir": f"{d}/coordinate/worktrees",
+            # Full diffs materialized from changed worktree commits, on the
+            # SHARED tree so they survive `worktree remove` and can be handed
+            # downstream as a pointer (a reviewer reads the diff, not the repo).
+            "diffs_dir": f"{d}/coordinate/diffs",
             "parallel_limit": 4,
             # Runner for tasks that don't name one. A string assigns it to
             # every unassigned task; a LIST round-robins across them (spread
@@ -293,6 +297,10 @@ class Config:
     @property
     def coordinate_worktrees_dir(self) -> Path:
         return self._p(self.data["coordinate"]["worktrees_dir"])
+
+    @property
+    def coordinate_diffs_dir(self) -> Path:
+        return self._p(self.data["coordinate"]["diffs_dir"])
 
     @property
     def coordinate_events_dir(self) -> Path:
