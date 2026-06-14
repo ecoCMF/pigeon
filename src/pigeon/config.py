@@ -137,9 +137,11 @@ def default_config(contract_dir: str = LEGACY_CONTRACT_DIR) -> dict[str, Any]:
             #   sonnet: [anthropic/claude-sonnet-4-6]        # bare list
             #   free-opencode:                               # object form
             #     models: [opencode/a-free, opencode/b-free]
-            #     max_concurrency: 2       # parsed now, enforced in a later phase
-            #     min_spawn_interval_s: 5
-            #     max_retries: 2
+            #     max_concurrency: 2       # cap concurrent in-flight on this pool
+            #     min_spawn_interval_s: 5  # min wall-clock gap between spawns
+            #     max_retries: 2           # re-queue a rate-limited exit, backoff
+            # The throttle knobs are enforced by the scheduler (clock-only — the
+            # only ceiling that binds before telemetry arrives post-exit).
             # Empty by default — models are opt-in per project. A runner whose
             # template carries a `{model}` placeholder consumes the resolved
             # model; default templates have none, so they are unaffected.
