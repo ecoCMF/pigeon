@@ -1204,3 +1204,113 @@ def test_model_report_ranks_and_applies_min_runs_floor():
     assert "insufficient data" in report and "thin" in report
     assert "never auto-sorts" in report                  # read-only disclaimer
     assert co.model_report([]) == "by model: no model-tagged tasks recorded yet"
+
+
+# ---------------------------------------------------- pool throttle (DESIGN §2e)
+def test_pool_throttle_parses_object_and_defaults():
+    t = co._pool_throttle({"models": ["m"], "max_concurrency": 2,
+                           "min_spawn_interval_s": 5, "max_retries": 3})
+    assert t == {"max_concurrency": 2, "min_spawn_interval_s": 5.0, "max_retries": 3}
+    bare = co._pool_throttle(["m1", "m2"])    # a list carries no throttle
+    assert bare == {"max_concurrency": None, "min_spawn_interval_s": 0.0, "max_retries": 0}
+
+
+def test_looks_rate_limited(tmp_path):
+    hit = tmp_path / "a.log"
+    hit.write_text("... Error: 429 rate limit ...")
+    miss = tmp_path / "b.log"
+    miss.write_text("all good, exit 0")
+    assert co._looks_rate_limited(hit) is True
+    assert co._looks_rate_limited(miss) is False
+
+
+def _pool_cfg(repo, runners, pools):
+    (repo.root / ".git").mkdir(exist_ok=True)
+    (repo.root / ".agentctx" / "config.yaml").write_text(
+        yaml.safe_dump({"coordinate": {"runners": runners, "model_pools": pools}}),
+        encoding="utf-8")
+    return load_config(repo.root)
+
+
+def test_pool_max_concurrency_serializes(repo):
+    runner = [sys.executable, "-c",
+              "import time;open('seq','a').write('S');time.sleep(0.15);"
+              "open('seq','a').write('E')"]
+    cfg = _pool_cfg(repo, {"r": runner},
+                    {"p": {"models": ["m1", "m2"], "max_concurrency": 1}})
+    tasks = _write_tasks(repo.root, {"sid": "pc", "tasks": [
+        {"id": f"t{i}", "runner": "r", "doing": "x", "model_pool": "p"}
+        for i in range(3)]})
+    assert co.run_coordinate(tasks, cfg, parallel_limit=4) == 0
+    seq = (repo.root / "seq").read_text()
+    assert seq.count("S") == 3
+    assert "SS" not in seq   # cap=1: never two starts before an end
+
+
+def test_pool_max_retries_requeues_only_on_rate_limit(repo):
+    rl = [sys.executable, "-c",
+          "import pathlib,sys;p=pathlib.Path('rc');"
+          "n=(int(p.read_text())if p.exists()else 0)+1;p.write_text(str(n));"
+          "print('upstream 429 rate limit');sys.exit(1)"]
+    cfg = _pool_cfg(repo, {"r": rl}, {"p": {"models": ["m"], "max_retries": 2}})
+    tasks = _write_tasks(repo.root, {"sid": "rt", "tasks": [
+        {"id": "t", "runner": "r", "doing": "x", "model_pool": "p"}]})
+    assert co.run_coordinate(tasks, cfg) == 1            # exhausts retries, fails
+    assert (repo.root / "rc").read_text() == "3"          # initial + 2 retries
+
+
+def test_non_rate_limited_failure_is_not_retried(repo):
+    boom = [sys.executable, "-c",
+            "import pathlib,sys;p=pathlib.Path('rc');"
+            "n=(int(p.read_text())if p.exists()else 0)+1;p.write_text(str(n));"
+            "print('plain failure');sys.exit(1)"]
+    cfg = _pool_cfg(repo, {"r": boom}, {"p": {"models": ["m"], "max_retries": 2}})
+    tasks = _write_tasks(repo.root, {"sid": "rt", "tasks": [
+        {"id": "t", "runner": "r", "doing": "x", "model_pool": "p"}]})
+    assert co.run_coordinate(tasks, cfg) == 1
+    assert (repo.root / "rc").read_text() == "1"          # no retry without the signal
+
+
+# ---------------------------------------------------- Phase F: verdict re-entry
+@pytest.mark.parametrize("task,needle", [
+    ({"id": "a", "runner": "py", "doing": "x", "reentry": "yes"}, "reentry"),
+    ({"id": "a", "runner": "py", "doing": "x", "reentry": True, "max_reentry": 0},
+     "positive integer"),
+    ({"id": "a", "runner": "py", "doing": "x", "max_reentry": 2}, "without 'reentry"),
+])
+def test_reentry_validation(repo, task, needle):
+    with pytest.raises(ValueError, match=needle):
+        co.load_tasks(_write_tasks(repo.root, _spec(tasks=[task])))
+
+
+def test_reentry_loops_until_verdict_approves(repo):
+    # The runner hands back verdict=rework twice, then approve — the loop should
+    # re-run it three times total and end green.
+    ruler = [sys.executable, "-c",
+             "import pathlib;from pigeon import handoff as ho;"
+             "from pigeon.config import load_config;cfg=load_config('.');"
+             "c=pathlib.Path('n');k=(int(c.read_text())if c.exists()else 0)+1;c.write_text(str(k));"
+             "v='approve' if k>=3 else 'rework';"
+             "ho.write_handoff(ho.build_handoff(sid='rb',frm='fix',to='Coordinator',"
+             "done=['x'],doing='fix',decisions={'verdict':v}),cfg)"]
+    cfg = _setup(repo, runners={"fix": ruler})
+    tasks = _write_tasks(repo.root, {"sid": "rb", "tasks": [
+        {"id": "fix", "runner": "fix", "doing": "rule and fix",
+         "reentry": True, "max_reentry": 3}]})
+    assert co.run_coordinate(tasks, cfg) == 0
+    assert (repo.root / "n").read_text() == "3"   # ran initial + 2 re-entries
+
+
+def test_reentry_is_bounded_by_max_reentry(repo):
+    # Always rework -> stops after max_reentry re-runs (initial + 2 = 3 total).
+    ruler = [sys.executable, "-c",
+             "import pathlib;from pigeon import handoff as ho;"
+             "from pigeon.config import load_config;cfg=load_config('.');"
+             "c=pathlib.Path('n');k=(int(c.read_text())if c.exists()else 0)+1;c.write_text(str(k));"
+             "ho.write_handoff(ho.build_handoff(sid='rb',frm='fix',to='Coordinator',"
+             "done=['x'],doing='fix',decisions={'verdict':'rework'}),cfg)"]
+    cfg = _setup(repo, runners={"fix": ruler})
+    tasks = _write_tasks(repo.root, {"sid": "rb", "tasks": [
+        {"id": "fix", "runner": "fix", "doing": "rule", "reentry": True, "max_reentry": 2}]})
+    assert co.run_coordinate(tasks, cfg) == 0
+    assert (repo.root / "n").read_text() == "3"   # initial + exactly 2 re-entries

@@ -171,6 +171,65 @@ def _pool_models(pool: Any) -> list[str]:
     return list(models)
 
 
+def _pool_throttle(pool: Any) -> dict[str, Any]:
+    """The spawn-side throttle knobs of a pool (object form only; a bare list
+    carries none). Clock-only, coordinator-enforceable (DESIGN §2e):
+      * max_concurrency      — cap concurrent in-flight tasks drawing on the pool
+      * min_spawn_interval_s — minimum wall-clock gap between spawns on the pool
+      * max_retries          — re-queue a rate-limited exit this many times
+    Defaults mean 'no throttle', so a bare list / absent knobs behave as today."""
+    d = pool if isinstance(pool, dict) else {}
+    mc = d.get("max_concurrency")
+    return {
+        "max_concurrency": int(mc) if mc is not None else None,
+        "min_spawn_interval_s": float(d.get("min_spawn_interval_s", 0) or 0),
+        "max_retries": int(d.get("max_retries", 0) or 0),
+    }
+
+
+# Coarse rate-limit / contention signal in a child's output — the only thing the
+# coordinator can react to (telemetry arrives only post-exit; DESIGN Fact #4).
+_RATE_LIMIT_RE = re.compile(
+    r"\b(429|503|rate[ -]?limit|too many requests|quota exceeded|overloaded|"
+    r"database is locked|resource exhausted)\b", re.IGNORECASE)
+
+
+def _looks_rate_limited(log_path: Path) -> bool:
+    """True when a task's log tail carries a rate-limit/contention signal."""
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return bool(_RATE_LIMIT_RE.search(text[-4000:]))
+
+
+def _min_opt(current: float | None, candidate: float) -> float:
+    """min() that treats None as 'unset' — for accumulating the soonest wait."""
+    return candidate if current is None else min(current, candidate)
+
+
+def _latest_handback(config: Config, sid: str, task_id: str) -> dict[str, Any] | None:
+    """The newest hand-back this task wrote to the Coordinator (``from==task_id``,
+    ``to==COORDINATOR``), by claim sequence. The re-entry signal lives in its
+    ``state.decisions.verdict``; ``None`` when the task handed nothing back."""
+    d = config.handoffs_dir
+    if not d.is_dir():
+        return None
+    best_n, best = -1, None
+    for path in d.glob(f"{sid}-*.json"):
+        m = re.match(rf"{re.escape(sid)}-(\d+)", path.stem)
+        n = int(m.group(1)) if m else -1
+        if n <= best_n:
+            continue
+        try:
+            h = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if h.get("from") == task_id and h.get("to") == COORDINATOR:
+            best_n, best = n, h
+    return best
+
+
 def load_tasks(path: Path,
                default_runner: str | list[str] | None = None,
                model_pools: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -245,6 +304,17 @@ def load_tasks(path: Path,
             raise ValueError(
                 f"task {tid!r}: 'receives' must be a list of pointer/glob strings"
             )
+        if "reentry" in task and not isinstance(task["reentry"], bool):
+            raise ValueError(f"task {tid!r}: 'reentry' must be true or false")
+        max_reentry = task.get("max_reentry")
+        if max_reentry is not None and (
+                not isinstance(max_reentry, int) or isinstance(max_reentry, bool)
+                or max_reentry < 1):
+            raise ValueError(
+                f"task {tid!r}: 'max_reentry' must be a positive integer")
+        if max_reentry is not None and not task.get("reentry"):
+            raise ValueError(
+                f"task {tid!r}: 'max_reentry' set without 'reentry: true'")
         crew = task.get("crew")
         if crew is not None:
             if not isinstance(crew, dict):
@@ -544,8 +614,12 @@ def _task_badges(task: dict[str, Any]) -> str:
     badges = [task["runner"]]
     if task.get("model"):
         badges.append(f"model={task['model']}")
+    if task.get("model_pool"):
+        badges.append(f"pool={task['model_pool']}")
     if task.get("receives"):
         badges.append(f"receives×{len(task['receives'])}")
+    if task.get("reentry"):
+        badges.append(f"reentry≤{int(task.get('max_reentry', 2))}")
     crew = task.get("crew") or {}
     n_crew = len(crew.get("subagents", [])) + len(crew.get("skills", []))
     if n_crew:
@@ -1514,10 +1588,10 @@ def run_coordinate(
     deferred: set[str] = set()
     for task in tasks:
         log_path, log_rel = _log_paths(task)
-        if task.get("receives"):
-            # Speculative: account a no-write handoff for token visibility and
-            # show a placeholder command. The real append-only write happens at
-            # spawn — honoring --dry-run (no file is written here) and Fact #2.
+        # A `receives:` task defers to resolve cross-wave pointers at spawn; a
+        # `reentry:` task defers so every attempt writes a fresh handoff (its
+        # prior verdict's fix list injected). Both write once per spawn.
+        if task.get("receives") or task.get("reentry"):
             injected = _resolve_receives(config, task)
             tokens.account_handoff(
                 config, _make_handoff(task, injected, do_pack=False),
@@ -1528,8 +1602,11 @@ def run_coordinate(
             recorder.task(task["id"], command=disp_cmd, log=log_rel)
             deferred.add(task["id"])
             commands.append((task, disp_cmd, log_path))
-            print(f"[{task['id']}] receives (resolved at spawn) — "
-                  f"matching now: {', '.join(injected) or 'none yet'}")
+            why = ("reentry — handoff written per attempt"
+                   if task.get("reentry") and not task.get("receives")
+                   else f"receives (resolved at spawn) — matching now: "
+                        f"{', '.join(injected) or 'none yet'}")
+            print(f"[{task['id']}] {why}")
         else:
             cmd, rel = _write_handoff_cmd(task, [])
             recorder.task(task["id"], command=cmd, handoff=rel, log=log_rel)
@@ -1549,6 +1626,19 @@ def run_coordinate(
 
     run_id = recorder.data["run_id"]
     running_procs: dict[str, subprocess.Popen] = {}
+
+    # Pool throttle (DESIGN §2e) and Phase F re-entry state.
+    pools_cfg = ccfg.get("model_pools") or {}
+    pool_of = {t["id"]: t.get("model_pool") for t in tasks}
+    throttle_of = {name: _pool_throttle(p) for name, p in pools_cfg.items()}
+    inflight_pool: dict[str, int] = {}
+    pool_last_spawn: dict[str, float] = {}
+    task_retries: dict[str, int] = {}
+    not_before: dict[str, float] = {}            # monotonic floor for (re)spawn
+    reentry_max = {t["id"]: int(t.get("max_reentry", 2))
+                   for t in tasks if t.get("reentry")}
+    reentry_count: dict[str, int] = {}
+    reentry_inject: dict[str, list[str]] = {}    # fix-list pointers for next attempt
 
     def _execute(task: dict[str, Any], cmd: list[str], log_path: Path) -> int:
         tid = task["id"]
@@ -1588,10 +1678,10 @@ def run_coordinate(
         return rc
 
     def _spawn_prepare(task: dict[str, Any]) -> list[str]:
-        """Deferred write-at-spawn for a `receives:` task: now that its `needs`
-        have run, resolve its pointers against the populated tree, write its one
-        handoff (append-only), and return the real command."""
-        injected = _resolve_receives(config, task)
+        """Deferred write-at-spawn for a `receives:`/`reentry:` task: resolve its
+        cross-wave pointers against the now-populated tree (plus, on a re-entry,
+        the prior verdict's fix list), write its one handoff, return the cmd."""
+        injected = _resolve_receives(config, task) + reentry_inject.get(task["id"], [])
         cmd, rel = _write_handoff_cmd(task, injected)
         recorder.task(task["id"], handoff=rel)
         recorder.event("handoff.dispatched", task=task["id"], handoff=rel)
@@ -1634,20 +1724,80 @@ def run_coordinate(
                         with _print_lock:
                             print(f"[{tid}] skipped "
                                   f"(dependency failed: {', '.join(sorted(bad))})")
+            spawn_wait: float | None = None   # soonest a timing-deferred task runs
             for tid in sorted(pending):
-                if deps[tid] <= succeeded:
-                    task, cmd, log_path = by_id[tid]
-                    if tid in deferred:   # write its handoff now that needs ran
-                        cmd = _spawn_prepare(task)
-                    fut = pool.submit(_execute, task, cmd, log_path)
-                    futures[fut] = tid
-                    pending.discard(tid)
+                if not (deps[tid] <= succeeded):
+                    continue
+                now = time.monotonic()
+                floor = not_before.get(tid, 0.0)
+                if now < floor:               # backoff / retry cooldown
+                    spawn_wait = _min_opt(spawn_wait, floor - now)
+                    continue
+                pname = pool_of.get(tid)
+                thr = throttle_of.get(pname) if pname else None
+                if thr:
+                    cap = thr["max_concurrency"]
+                    if cap is not None and inflight_pool.get(pname, 0) >= cap:
+                        continue              # pool saturated; frees on a completion
+                    interval = thr["min_spawn_interval_s"]
+                    last = pool_last_spawn.get(pname)
+                    if interval and last is not None and (now - last) < interval:
+                        spawn_wait = _min_opt(spawn_wait, interval - (now - last))
+                        continue
+                task, cmd, log_path = by_id[tid]
+                if tid in deferred:           # write its handoff now (resolved)
+                    cmd = _spawn_prepare(task)
+                fut = pool.submit(_execute, task, cmd, log_path)
+                futures[fut] = tid
+                pending.discard(tid)
+                if pname:
+                    inflight_pool[pname] = inflight_pool.get(pname, 0) + 1
+                    pool_last_spawn[pname] = time.monotonic()
             if not futures:
-                break  # graph is acyclic: nothing running, nothing ready => done
-            done_set, _ = wait(set(futures), return_when=FIRST_COMPLETED)
+                if spawn_wait and spawn_wait > 0:   # only a throttle window holds us
+                    time.sleep(min(spawn_wait, 5.0))
+                    continue
+                break  # nothing running, nothing ready => done
+            # Wake on the first completion, or sooner if a throttle window opens.
+            timeout = min(spawn_wait, 5.0) if (spawn_wait and spawn_wait > 0) else None
+            done_set, _ = wait(set(futures), return_when=FIRST_COMPLETED, timeout=timeout)
             for fut in done_set:
                 tid = futures.pop(fut)
                 rc = fut.result()
+                pname = pool_of.get(tid)
+                if pname and inflight_pool.get(pname):
+                    inflight_pool[pname] -= 1
+                log_path = by_id[tid][2]
+                thr = throttle_of.get(pname) if pname else None
+                max_r = thr["max_retries"] if thr else 0
+                # Reactive rate-limit safety net (DESIGN §2e): re-queue with backoff.
+                if (rc != 0 and max_r and task_retries.get(tid, 0) < max_r
+                        and _looks_rate_limited(log_path)):
+                    task_retries[tid] = task_retries.get(tid, 0) + 1
+                    backoff = min(60.0, 0.5 * 2 ** (task_retries[tid] - 1))
+                    not_before[tid] = time.monotonic() + backoff
+                    pending.add(tid)
+                    recorder.task(tid, status="queued", retry=task_retries[tid])
+                    with _print_lock:
+                        print(f"[{tid}] rate-limited — retry "
+                              f"{task_retries[tid]}/{max_r} in {backoff:.1f}s")
+                    continue
+                # Phase F: a re-entry task that ruled "rework" re-runs with the
+                # fix list injected, until it approves or hits max_reentry.
+                if (rc == 0 and tid in reentry_max
+                        and reentry_count.get(tid, 0) < reentry_max[tid]):
+                    hb = _latest_handback(config, sid, tid)
+                    state = (hb or {}).get("state") or {}
+                    if (state.get("decisions") or {}).get("verdict") == "rework":
+                        reentry_count[tid] = reentry_count.get(tid, 0) + 1
+                        reentry_inject[tid] = list(state.get("artifacts") or [])
+                        pending.add(tid)      # re-queue; NOT marked succeeded
+                        recorder.task(tid, status="queued",
+                                      reentry=reentry_count[tid])
+                        with _print_lock:
+                            print(f"[{tid}] verdict=rework — re-entry "
+                                  f"{reentry_count[tid]}/{reentry_max[tid]}")
+                        continue
                 results[tid] = rc
                 (succeeded if rc == 0 else blocked).add(tid)
       except KeyboardInterrupt:
