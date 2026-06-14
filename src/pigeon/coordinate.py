@@ -899,6 +899,78 @@ def by_agent_report(run: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def model_stats(runs: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Aggregate every model-tagged task across runs: the empirical track record
+    behind ``pigeon metrics --by-model``. Returns a JSON-able dict per model."""
+    agg: dict[str, dict[str, Any]] = {}
+    for run in runs:
+        rid = run.get("run_id")
+        for _tid, t in (run.get("tasks") or {}).items():
+            m = t.get("model")
+            if not m:
+                continue
+            a = agg.setdefault(m, {
+                "tasks": 0, "ok": 0, "failed": 0, "duration_s": 0.0,
+                "tokens": 0, "cost_usd": 0.0, "_runs": set(),
+            })
+            a["_runs"].add(rid)
+            a["tasks"] += 1
+            status = t.get("status")
+            if status in ("completed", "exited"):
+                a["ok"] += 1
+            elif status in ("failed", "spawn-failed"):
+                a["failed"] += 1
+            a["duration_s"] += float(t.get("duration_s") or 0)
+            tel = t.get("telemetry") or {}
+            a["tokens"] += int(tel.get("total_tokens") or 0)
+            a["cost_usd"] += float(tel.get("total_cost_usd") or 0)
+    out: dict[str, dict[str, Any]] = {}
+    for m, a in agg.items():
+        decided = a["ok"] + a["failed"]
+        out[m] = {
+            "tasks": a["tasks"], "ok": a["ok"], "failed": a["failed"],
+            "runs": len(a["_runs"]),
+            "win_rate": round(a["ok"] / decided, 3) if decided else None,
+            "avg_duration_s": (round(a["duration_s"] / a["tasks"], 1)
+                               if a["tasks"] else 0.0),
+            "tokens": a["tokens"], "cost_usd": round(a["cost_usd"], 4),
+        }
+    return out
+
+
+def model_report(runs: list[dict[str, Any]], *, min_runs: int = 3) -> str:
+    """Offline, read-only per-model track record — win-rate, speed, spend, ranked.
+
+    Purely diagnostic: a human or agent reads it to edit a ``model_pool`` by hand.
+    The coordinator NEVER consumes it to re-sort round-robin (PLAN.md ruling #8 —
+    auto-demotion would starve a model on one transient failure). ``min_runs`` is
+    the sample-size floor below which a model shows as 'insufficient data'."""
+    stats = model_stats(runs)
+    if not stats:
+        return "by model: no model-tagged tasks recorded yet"
+    enough = {m: s for m, s in stats.items() if s["tasks"] >= min_runs}
+    thin = {m: s for m, s in stats.items() if s["tasks"] < min_runs}
+    lines = [f"model track record (ranked by win-rate; min_runs={min_runs}):"]
+    for m in sorted(enough, key=lambda m: (enough[m]["win_rate"] or 0,
+                                           enough[m]["tasks"]), reverse=True):
+        s = enough[m]
+        wr = f"{round(100 * s['win_rate'])}%" if s["win_rate"] is not None else "n/a"
+        line = (f"  {m:<32} win={wr:<4} n={s['tasks']} "
+                f"({s['ok']} ok/{s['failed']} fail)  avg={s['avg_duration_s']}s  "
+                f"runs={s['runs']}")
+        if s["tokens"]:
+            line += f"  tokens={s['tokens']}"
+        if s["cost_usd"]:
+            line += f"  cost=${s['cost_usd']}"
+        lines.append(line)
+    for m in sorted(thin):
+        lines.append(f"  {m:<32} insufficient data "
+                     f"(n={thin[m]['tasks']} < {min_runs})")
+    lines.append("  (diagnostic only — edit your model_pool by hand; the "
+                 "coordinator never auto-sorts on this)")
+    return "\n".join(lines)
+
+
 def critical_path_report(run: dict[str, Any]) -> str:
     """Duration-weighted longest chain — where wall-clock optimization pays."""
     tasks = run.get("tasks") or {}
