@@ -1,0 +1,50 @@
+sid: erv-demo
+# Edit -> Review -> Verify -> Concordance, built end-to-end on Phases A-C.
+#
+#   edit (worktree) ──▶ review ─┐
+#                   └─▶ verify ─┴─▶ concord
+#
+# * `edit` runs ISOLATED (worktree); its full diff is materialized to
+#   .pigeon/coordinate/diffs/<run_id>/edit.diff on the SHARED tree (Phase B).
+# * `review` and `verify` RECEIVE that diff by glob (Phase C) — the <run_id> is
+#   filled at spawn, and the diff is a pointer, never pasted into a prompt.
+# * `review` follows the `code-reviewer` playbook; `verify` is an ordinary task
+#   that runs the suite (no coordinator magic); `concord` follows the
+#   `review-concordance` playbook and merges the reviews + verify result.
+#
+# Swap `edit`'s runner for a cheap free model to dogfood the army — e.g.
+#   runner: opencode            # one template with {model}
+#   model_pool: free-opencode   # round-robined, sha1(sid)-seeded
+# and have better models (claude/opus) do the review + concordance.
+tasks:
+  - id: edit
+    runner: claude
+    isolation: worktree
+    doing: "Implement the requested change; keep it minimal and focused."
+
+  - id: review
+    runner: claude
+    needs: [edit]
+    receives: ["repo://.pigeon/coordinate/diffs/*/edit.diff"]
+    crew:
+      skills: [code-reviewer]
+    doing: "Review the edit's diff; write findings to a review artifact."
+
+  - id: verify
+    runner: claude
+    needs: [edit]
+    receives: ["repo://.pigeon/coordinate/diffs/*/edit.diff"]
+    doing: >-
+      Run the test suite against the change and write
+      .pigeon/coordinate/reviews/erv-demo-verify.json with {"result": "pass|fail",
+      ...}, then hand back listing it in state.artifacts.
+
+  - id: concord
+    runner: claude
+    needs: [review, verify]
+    receives:
+      - "repo://.pigeon/coordinate/reviews/erv-demo-review.json"
+      - "repo://.pigeon/coordinate/reviews/erv-demo-verify.json"
+    crew:
+      skills: [review-concordance]
+    doing: "Merge the reviews + verify result into one verdict and deduped fix list."

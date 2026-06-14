@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -978,3 +979,197 @@ def test_readonly_must_be_bool(repo):
     with pytest.raises(ValueError, match="readonly"):
         co.load_tasks(_write_tasks(repo.root, _spec(tasks=[
             {"id": "a", "runner": "py", "doing": "x", "readonly": "yes"}])))
+
+
+# -------------------------------------------------- model field & model pools
+_PY_MODEL = [sys.executable, "-c", "print('model is {model} for {task_id}')"]
+
+
+def test_model_substitutes_into_template_only_when_resolved(repo, capsys):
+    cfg = _setup(repo, runners={"m": _PY_MODEL})
+    tasks = _write_tasks(repo.root, _spec(tasks=[
+        {"id": "a", "runner": "m", "doing": "x", "model": "prov/xl"}]))
+    co.run_coordinate(tasks, cfg, dry_run=True)
+    out = capsys.readouterr().out
+    assert "prov/xl" in out          # {model} filled with the resolved model
+    assert "{model}" not in out      # no literal placeholder leaks to the CLI
+
+
+def test_no_model_leaves_template_verbatim(repo, capsys):
+    # A template with no {model} and a task with no model is byte-for-byte today.
+    cfg = _setup(repo, runners={"py": _PY_OK})
+    tasks = _write_tasks(repo.root, _spec(tasks=[
+        {"id": "a", "runner": "py", "doing": "x"}]))
+    co.run_coordinate(tasks, cfg, dry_run=True)
+    out = capsys.readouterr().out
+    assert "hello from a" in out
+    assert "{model}" not in out and "model=" not in out
+
+
+def test_preflight_rejects_unresolved_model_placeholder(repo, capsys):
+    cfg = _setup(repo, runners={"m": _PY_MODEL})
+    tasks = _write_tasks(repo.root, _spec(tasks=[
+        {"id": "a", "runner": "m", "doing": "x"}]))  # template wants {model}, none set
+    rc = co.run_coordinate(tasks, cfg, dry_run=True)
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "{model}" in err and "no model resolved" in err
+
+
+def test_model_set_but_template_lacks_placeholder_warns(repo, capsys):
+    cfg = _setup(repo, runners={"py": _PY_OK})  # no {model} in template
+    tasks = _write_tasks(repo.root, _spec(tasks=[
+        {"id": "a", "runner": "py", "doing": "x", "model": "prov/xl"}]))
+    rc = co.run_coordinate(tasks, cfg, dry_run=True)
+    assert rc == 0  # advisory, not blocking
+    assert "model ignored" in capsys.readouterr().err
+
+
+def test_model_and_model_pool_are_mutually_exclusive(repo):
+    path = _write_tasks(repo.root, _spec(tasks=[
+        {"id": "a", "runner": "py", "doing": "x", "model": "m", "model_pool": "p"}]))
+    with pytest.raises(ValueError, match="not both"):
+        co.load_tasks(path, model_pools={"p": ["m0"]})
+
+
+def test_model_must_be_non_empty_string(repo):
+    path = _write_tasks(repo.root, _spec(tasks=[
+        {"id": "a", "runner": "py", "doing": "x", "model": ""}]))
+    with pytest.raises(ValueError, match="'model' must be"):
+        co.load_tasks(path)
+
+
+def test_model_pool_undefined_or_empty_raises(repo):
+    path = _write_tasks(repo.root, _spec(tasks=[
+        {"id": "a", "runner": "py", "doing": "x", "model_pool": "ghost"}]))
+    with pytest.raises(ValueError, match="undefined or empty"):
+        co.load_tasks(path, model_pools={"real": ["m0"]})
+
+
+def test_model_pool_round_robin_is_deterministic_per_sid(repo):
+    pool = ["m0", "m1", "m2"]
+    spec = {"sid": "alpha", "tasks": [
+        {"id": "a", "runner": "py", "doing": "x", "model_pool": "free"},
+        {"id": "b", "runner": "py", "doing": "x", "model_pool": "free"},
+        {"id": "c", "runner": "py", "doing": "x", "model_pool": "free"},
+    ]}
+    loaded = co.load_tasks(_write_tasks(repo.root, spec), model_pools={"free": pool})
+    models = [t["model"] for t in loaded["tasks"]]
+    # mirror the implementation: sha1(sid)-seeded offset, then round-robin.
+    off = int(hashlib.sha1(b"alpha").hexdigest(), 16) % len(pool)
+    assert models == [pool[(off + i) % len(pool)] for i in range(3)]
+    # same sid => identical mapping (reproducible)
+    again = co.load_tasks(_write_tasks(repo.root, spec), model_pools={"free": pool})
+    assert [t["model"] for t in again["tasks"]] == models
+    # a different sid rotates the starting point
+    spec2 = dict(spec, sid="beta")
+    other = co.load_tasks(_write_tasks(repo.root, spec2), model_pools={"free": pool})
+    off2 = int(hashlib.sha1(b"beta").hexdigest(), 16) % len(pool)
+    assert other["tasks"][0]["model"] == pool[off2 % len(pool)]
+
+
+def test_model_pool_object_form_normalizes_to_models(repo):
+    pools = {"free": {"models": ["m0", "m1"], "max_concurrency": 2,
+                      "min_spawn_interval_s": 5, "max_retries": 2}}
+    loaded = co.load_tasks(
+        _write_tasks(repo.root, _spec(tasks=[
+            {"id": "a", "runner": "py", "doing": "x", "model_pool": "free"}])),
+        model_pools=pools)
+    assert loaded["tasks"][0]["model"] in ("m0", "m1")
+
+
+def test_plan_and_badges_surface_resolved_model(repo):
+    cfg = _setup(repo, runners={"m": _PY_MODEL})
+    spec = co.load_tasks(_write_tasks(repo.root, _spec(tasks=[
+        {"id": "a", "runner": "m", "doing": "x", "model": "prov/xl"}])))
+    p = co.plan(cfg, spec)
+    assert p["tasks"]["a"]["model"] == "prov/xl"
+    assert "model=prov/xl" in co.format_plan(p, spec["tasks"])
+
+
+# --------------------------------------------- Phase B: diff materialization
+def test_worktree_materializes_full_diff_on_shared_tree(repo):
+    cfg = _setup(repo, runners={
+        "writer": [sys.executable, "-c", "open('out_{task_id}.txt','w').write('made')"],
+    })
+    _real_git(repo.root)
+    tasks = _write_tasks(repo.root, _spec(tasks=[
+        {"id": "iso", "runner": "writer", "doing": "x", "isolation": "worktree"}]))
+    assert co.run_coordinate(tasks, cfg) == 0
+    run = co.list_runs(cfg, sid="co1")[0]
+    diff_rel = run["tasks"]["iso"]["isolation"]["diff"]
+    assert "co1-1" in diff_rel                       # under diffs/<run_id>/
+    diff_path = repo.root / diff_rel
+    assert diff_path.is_file()                       # survives `worktree remove`
+    body = diff_path.read_text(encoding="utf-8")
+    assert "out_iso.txt" in body and "+made" in body  # a real unified diff
+
+
+def test_by_agent_report_adds_by_model_rollup():
+    run = {"run_id": "r1", "tasks": {
+        "a": {"runner": "oc", "model": "m1", "status": "completed",
+              "duration_s": 1.0, "telemetry": {"total_tokens": 10}},
+        "b": {"runner": "oc", "model": "m2", "status": "failed"},
+        "c": {"runner": "py", "status": "completed"},  # no model -> not in rollup
+    }}
+    report = co.by_agent_report(run)
+    assert "by model:" in report
+    by_model = report.split("by model:", 1)[1]
+    assert "m1" in by_model and "m2" in by_model
+    assert "py" not in by_model  # model-less runner stays out of the model rollup
+
+
+# ------------------------------------------ Phase C: receives: cross-wave inject
+def test_receives_must_be_list_of_strings(repo):
+    with pytest.raises(ValueError, match="receives"):
+        co.load_tasks(_write_tasks(repo.root, _spec(tasks=[
+            {"id": "a", "runner": "py", "doing": "x", "receives": "repo://x"}])))
+
+
+def test_receives_injects_upstream_pointer_at_spawn(repo):
+    # Producer writes a file; consumer `receives:` it by glob. The pointer does
+    # not exist up-front — only after the producer runs — so it proves the write
+    # is deferred to spawn.
+    cfg = _setup(repo, runners={
+        "producer": [sys.executable, "-c", "open('prod_out.txt','w').write('hello')"],
+        "consumer": _PY_OK,
+    })
+    tasks = _write_tasks(repo.root, {"sid": "rc", "tasks": [
+        {"id": "prod", "runner": "producer", "doing": "make a file"},
+        {"id": "cons", "runner": "consumer", "doing": "consume", "needs": ["prod"],
+         "receives": ["repo://prod_*.txt"]},
+    ]})
+    assert co.run_coordinate(tasks, cfg) == 0
+    handoffs = [ho.load_handoff(p, cfg) for p in cfg.handoffs_dir.glob("rc-*.json")]
+    cons = [h for h in handoffs if h["to"] == "cons"]
+    assert len(cons) == 1   # exactly one handoff, written once at spawn
+    assert "repo://prod_out.txt" in (cons[0].get("state") or {}).get("artifacts", [])
+
+
+def test_receives_dry_run_is_speculative_and_defers_write(repo, capsys):
+    cfg = _setup(repo, runners={"py": _PY_OK})
+    tasks = _write_tasks(repo.root, {"sid": "rc", "tasks": [
+        {"id": "prod", "runner": "py", "doing": "x"},
+        {"id": "cons", "runner": "py", "doing": "y", "needs": ["prod"],
+         "receives": ["repo://prod_out.txt"]},
+    ]})
+    assert co.run_coordinate(tasks, cfg, dry_run=True) == 0
+    out = capsys.readouterr().out
+    assert "[prod] would run:" in out and "[cons] would run:" in out  # ALL commands
+    assert "speculative — resolved at spawn" in out                   # marked
+    written = {h["to"] for h in
+               [ho.load_handoff(p, cfg) for p in cfg.handoffs_dir.glob("rc-*.json")]}
+    assert "prod" in written        # non-receives task: handoff written up-front
+    assert "cons" not in written    # receives task: no file written in dry-run
+
+
+def test_receives_from_worktree_upstream_warns(repo, capsys):
+    cfg = _setup(repo, runners={"py": _PY_OK})
+    _real_git(repo.root)
+    tasks = _write_tasks(repo.root, {"sid": "rc", "tasks": [
+        {"id": "iso", "runner": "py", "doing": "x", "isolation": "worktree"},
+        {"id": "cons", "runner": "py", "doing": "y", "needs": ["iso"],
+         "receives": ["repo://whatever/*.txt"]},
+    ]})
+    co.run_coordinate(tasks, cfg, dry_run=True)
+    assert "worktree-isolated upstream" in capsys.readouterr().err

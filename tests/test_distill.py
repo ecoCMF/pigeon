@@ -55,6 +55,24 @@ def test_distill_session_writes_record_and_ledger(repo):
     assert ev[0]["baseline_tokens"] > ev[0]["actual_tokens"] > 0
 
 
+def test_distill_captures_model_and_intent_for_reasoning_bank(repo):
+    rec = co.RunRecorder(
+        repo, "m1",
+        [{"id": "g", "runner": "oc", "doing": "draft the spec", "model": "prov/x"}],
+        tasks_file="t.yaml", parallel_limit=1, skip_permissions=False,
+        dry_run=False, telemetry=False, isolated_env=None, depth=0)
+    rec.task("g", status="exited", exit_code=0, duration_s=0.2,
+             telemetry={"total_tokens": 42})
+    rec.finish("completed",
+               summary={"ok": 1, "failed": 0, "skipped": 0, "total": 1})
+    res = distill.distill_session(repo, "m1")
+    record = (repo.root / res["session"]).read_text(encoding="utf-8")
+    assert "model prov/x" in record               # the task line carries the model
+    assert "## Models (latest run)" in record      # the per-model rollup section
+    assert "**prov/x** — 1/1 ok" in record         # what worked, this run
+    assert "draft the spec" in record              # intent keywords land in the index
+
+
 def test_distill_is_deterministic_and_idempotent(repo):
     _handoff(repo, "s1", "A", "B", decisions={"k": 1})
     first = distill.distill_session(repo, "s1")

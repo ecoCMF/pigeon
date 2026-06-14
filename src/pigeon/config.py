@@ -92,6 +92,10 @@ def default_config(contract_dir: str = LEGACY_CONTRACT_DIR) -> dict[str, Any]:
             "runs_dir": f"{d}/coordinate/runs",
             "events_dir": f"{d}/coordinate/events",
             "worktrees_dir": f"{d}/coordinate/worktrees",
+            # Full diffs materialized from changed worktree commits, on the
+            # SHARED tree so they survive `worktree remove` and can be handed
+            # downstream as a pointer (a reviewer reads the diff, not the repo).
+            "diffs_dir": f"{d}/coordinate/diffs",
             "parallel_limit": 4,
             # Runner for tasks that don't name one. A string assigns it to
             # every unassigned task; a LIST round-robins across them (spread
@@ -126,6 +130,20 @@ def default_config(contract_dir: str = LEGACY_CONTRACT_DIR) -> dict[str, Any]:
                 "agy": [],
                 "opencode": [],
             },
+            # Named model pools for the `model_pool:` task field. A pool's models
+            # are round-robined across the tasks that name it, seeded by sid so
+            # the assignment is reproducible per session yet spread across
+            # sessions. Two forms, both accepted:
+            #   sonnet: [anthropic/claude-sonnet-4-6]        # bare list
+            #   free-opencode:                               # object form
+            #     models: [opencode/a-free, opencode/b-free]
+            #     max_concurrency: 2       # parsed now, enforced in a later phase
+            #     min_spawn_interval_s: 5
+            #     max_retries: 2
+            # Empty by default — models are opt-in per project. A runner whose
+            # template carries a `{model}` placeholder consumes the resolved
+            # model; default templates have none, so they are unaffected.
+            "model_pools": {},
             # Strict mode: when set, only these env vars (plus a functional
             # baseline: PATH/HOME/...) reach spawned agents. None = inherit all.
             "env_allowlist": None,
@@ -279,6 +297,10 @@ class Config:
     @property
     def coordinate_worktrees_dir(self) -> Path:
         return self._p(self.data["coordinate"]["worktrees_dir"])
+
+    @property
+    def coordinate_diffs_dir(self) -> Path:
+        return self._p(self.data["coordinate"]["diffs_dir"])
 
     @property
     def coordinate_events_dir(self) -> Path:

@@ -23,7 +23,6 @@ files, baseline = the raw events they replace in an agent's context.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any
 
 from .config import Config
@@ -58,6 +57,8 @@ def _render_session(sid: str, runs: list[dict[str, Any]],
         lines += ["", f"## Tasks (latest run {latest['run_id']})"]
         for tid, t in sorted((latest.get("tasks") or {}).items()):
             bits = [t.get("status", "?")]
+            if t.get("model"):
+                bits.append(f"model {t['model']}")
             if "exit_code" in t:
                 bits.append(f"exit {t['exit_code']}")
             if "duration_s" in t:
@@ -65,10 +66,39 @@ def _render_session(sid: str, runs: list[dict[str, Any]],
             iso = t.get("isolation") or {}
             if iso.get("branch"):
                 bits.append(f"branch {iso['branch']}")
+            if iso.get("diff"):
+                bits.append(f"diff {iso['diff']}")
             if t.get("skipped_because"):
                 bits.append(f"because: {', '.join(t['skipped_because'])}")
-            lines.append(f"- **{tid}** — {', '.join(bits)}")
+            # Append the task's intent so its keywords land in the retrieval
+            # index — `pigeon retrieve "<what a task did>"` then hits this row.
+            doing = (t.get("doing") or "").strip()
+            tail = f" — {doing}" if doing else ""
+            lines.append(f"- **{tid}** — {', '.join(bits)}{tail}")
         lines.append("")
+
+        # Per-model rollup: the empirical "what worked" record for this run —
+        # which model ran, how many it landed, what it cost. Committed + indexed,
+        # so the next run can recall a model's track record (Reasoning Bank).
+        model_stats: dict[str, dict[str, Any]] = {}
+        for t in (latest.get("tasks") or {}).values():
+            m = t.get("model")
+            if not m:
+                continue
+            s = model_stats.setdefault(m, {"tasks": 0, "ok": 0, "tokens": 0})
+            s["tasks"] += 1
+            if t.get("status") in ("completed", "exited"):
+                s["ok"] += 1
+            s["tokens"] += int((t.get("telemetry") or {}).get("total_tokens") or 0)
+        if model_stats:
+            lines += ["## Models (latest run)"]
+            for m in sorted(model_stats):
+                s = model_stats[m]
+                row = f"- **{m}** — {s['ok']}/{s['tasks']} ok"
+                if s["tokens"]:
+                    row += f", {s['tokens']} tokens"
+                lines.append(row)
+            lines.append("")
 
     decisions = [(key, val, rel) for rel, h in handoffs
                  for key, val in ((h.get("state") or {}).get("decisions") or {}).items()]

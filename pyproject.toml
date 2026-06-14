@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pigeon"
-version = "0.1.3"
+version = "0.2.0"
 description = "Carrier for cross-model agent context: canonical context, validated handoffs, parallel coordination, hybrid retrieval, distilled memory, token instrumentation. Formerly agentctx: canonical context, validated handoffs, hybrid retrieval, token instrumentation."
 readme = "README.md"
 requires-python = ">=3.11"

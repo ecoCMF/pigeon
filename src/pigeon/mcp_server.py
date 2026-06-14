@@ -159,7 +159,8 @@ def coordinate_plan_impl(config: Config, tasks_file: str) -> dict[str, Any]:
     """Read-only preview of a tasks file: waves, badges, preflight verdict."""
     spec = coordinate.load_tasks(
         (config.root / tasks_file).resolve(),
-        default_runner=config.coordinate_cfg.get("default_runner"))
+        default_runner=config.coordinate_cfg.get("default_runner"),
+        model_pools=config.coordinate_cfg.get("model_pools"))
     return coordinate.plan(config, spec)
 
 
