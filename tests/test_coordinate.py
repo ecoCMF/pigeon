@@ -1173,3 +1173,34 @@ def test_receives_from_worktree_upstream_warns(repo, capsys):
     ]})
     co.run_coordinate(tasks, cfg, dry_run=True)
     assert "worktree-isolated upstream" in capsys.readouterr().err
+
+
+# ------------------------------------- Phase E: offline per-model track record
+def _model_runs():
+    return [{"run_id": "r1", "tasks": {
+        "a": {"model": "good", "status": "completed", "duration_s": 1.0,
+              "telemetry": {"total_tokens": 5}},
+        "b": {"model": "good", "status": "completed", "duration_s": 1.0},
+        "c": {"model": "good", "status": "exited", "duration_s": 1.0},
+        "d": {"model": "bad", "status": "failed", "duration_s": 2.0},
+        "e": {"model": "bad", "status": "failed"},
+        "f": {"model": "bad", "status": "completed"},
+        "g": {"model": "thin", "status": "completed"},   # n=1 -> insufficient
+        "h": {"runner": "py", "status": "completed"},     # no model -> excluded
+    }}]
+
+
+def test_model_stats_computes_win_rate_and_excludes_modelless():
+    stats = co.model_stats(_model_runs())
+    assert set(stats) == {"good", "bad", "thin"}     # model-less task excluded
+    assert stats["good"]["tasks"] == 3 and stats["good"]["win_rate"] == 1.0
+    assert stats["bad"]["win_rate"] == round(1 / 3, 3)
+    assert stats["good"]["runs"] == 1
+
+
+def test_model_report_ranks_and_applies_min_runs_floor():
+    report = co.model_report(_model_runs(), min_runs=3)
+    assert report.index("good") < report.index("bad")   # higher win-rate ranks first
+    assert "insufficient data" in report and "thin" in report
+    assert "never auto-sorts" in report                  # read-only disclaimer
+    assert co.model_report([]) == "by model: no model-tagged tasks recorded yet"

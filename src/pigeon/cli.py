@@ -4,7 +4,8 @@ Commands:
   refresh     rebuild manifest.json and regenerate CLAUDE.md / GEMINI.md
   handoff     build / validate / emit a handoff (pointers, not payloads)
   retrieve    hybrid ripgrep + BM25 query over the repo + manifest
-  metrics     token-accounting report (delta cost vs naive baseline)
+  metrics     token-accounting report (--by-model for per-model track record)
+  agents      discover agent CLIs installed here (usable as coordinate runners)
   demo        whole-MVP acceptance: 3-agent chain + retrieval, with totals
   plan        preview a tasks file: waves, badges, preflight — writes nothing
   coordinate  fan a tasks file out to agent CLIs (claude/agy/opencode) in parallel
@@ -27,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Config, load_config
-from . import context, coordinate, distill, init as init_mod, manifest, retrieval, tokens
+from . import agents, context, coordinate, distill, init as init_mod, manifest, retrieval, tokens
 from . import pack as pack_mod
 from . import graph as graph_mod
 from . import handoff as ho
@@ -192,9 +193,27 @@ def cmd_metrics(args: argparse.Namespace) -> int:
         before, after = tokens.prune_metrics(cfg, keep=args.prune)
         print(f"metrics: pruned {before - after} event(s), kept {after}")
         return 0
+    if args.by_model:
+        runs = coordinate.list_runs(cfg)
+        if args.json:
+            print(json.dumps(coordinate.model_stats(runs), indent=2))
+        else:
+            print(coordinate.model_report(runs, min_runs=args.min_runs))
+        return 0
     summary = tokens.summarize(cfg)
     exact = tokens.using_tiktoken(cfg.tokens_cfg.get("encoding", "cl100k_base"))
     print(tokens.format_summary(summary, exact=exact))
+    return 0
+
+
+# -------------------------------------------------------------------- agents
+def cmd_agents(args: argparse.Namespace) -> int:
+    cfg = _cfg(args)
+    records = agents.detect_agents(cfg)
+    if args.json:
+        print(json.dumps(records, indent=2))
+    else:
+        print(agents.format_agents(records))
     return 0
 
 
@@ -534,7 +553,20 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("metrics", help="Token-accounting report.")
     p.add_argument("--prune", type=int, default=None, metavar="N",
                    help="Keep only the newest N events in metrics.jsonl.")
+    p.add_argument("--by-model", action="store_true",
+                   help="Per-model track record across runs (win-rate, speed, "
+                        "spend) — diagnostic only; never auto-applied.")
+    p.add_argument("--min-runs", type=int, default=3, metavar="N",
+                   help="Sample-size floor for --by-model (default 3); below it "
+                        "a model shows as 'insufficient data'.")
+    p.add_argument("--json", action="store_true",
+                   help="With --by-model, emit raw per-model stats as JSON.")
     p.set_defaults(func=cmd_metrics)
+
+    p = sub.add_parser("agents", help="Discover agent CLIs installed on this "
+                                      "machine (which can run as coordinate runners).")
+    p.add_argument("--json", action="store_true", help="Emit raw detection records.")
+    p.set_defaults(func=cmd_agents)
 
     p = sub.add_parser("demo", help="Whole-MVP acceptance demo.")
     p.set_defaults(func=cmd_demo)
