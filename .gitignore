@@ -28,3 +28,6 @@ venv/
 .coverage
 .coverage.*
 htmlcov/
+
+# Claude Code local (per-machine) permissions — never shared
+.claude/settings.local.json
