@@ -13,7 +13,7 @@ try:  # single source of truth: installed package metadata (pyproject)
     from importlib.metadata import version as _pkg_version
     __version__ = _pkg_version("pigeon")
 except Exception:  # not installed (e.g. vendored checkout)
-    __version__ = "0.2.0"
+    __version__ = "0.3.0"
 SCHEMA_VERSION = "1.1"
 
 __all__ = ["__version__", "SCHEMA_VERSION"]
