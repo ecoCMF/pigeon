@@ -238,6 +238,13 @@ def load_tasks(path: Path,
             raise ValueError(
                 f"task {tid!r}: set 'model' or 'model_pool', not both"
             )
+        receives = task.get("receives")
+        if receives is not None and (
+                not isinstance(receives, list)
+                or not all(isinstance(x, str) and x for x in receives)):
+            raise ValueError(
+                f"task {tid!r}: 'receives' must be a list of pointer/glob strings"
+            )
         crew = task.get("crew")
         if crew is not None:
             if not isinstance(crew, dict):
@@ -456,6 +463,47 @@ def model_warnings(config: Config, spec: dict[str, Any]) -> list[str]:
     return warnings
 
 
+def receives_warnings(config: Config, spec: dict[str, Any]) -> list[str]:
+    """The worktree paradox (DESIGN §2d): a task that ``receives:`` from a
+    worktree-isolated upstream. Only that upstream's *materialized diff* and
+    *harvested handoffs* land on the shared tree; any other file artifact it
+    produced lives on a throwaway branch and will not resolve. Non-blocking."""
+    by_id = {t["id"]: t for t in spec["tasks"]}
+    warnings: list[str] = []
+    for task in spec["tasks"]:
+        if not task.get("receives"):
+            continue
+        wt = [n for n in (task.get("needs") or [])
+              if (by_id.get(n) or {}).get("isolation") == "worktree"]
+        if wt:
+            warnings.append(
+                f"task {task['id']!r} receives from worktree-isolated upstream(s) "
+                f"{', '.join(wt)} — only their materialized diff and harvested "
+                "handoffs live on the shared tree; other file artifacts won't resolve"
+            )
+    return warnings
+
+
+def _resolve_receives(config: Config, task: dict[str, Any]) -> list[str]:
+    """Expand a task's ``receives:`` globs into ``repo://`` pointers for files
+    that exist *now*, dropping (with a warning) any pattern that matches none.
+
+    The whole point of deferring this to spawn time: a glob like
+    ``repo://.pigeon/coordinate/diffs/<run>/*.diff`` is empty up-front and
+    populated only once the upstream tasks have run."""
+    out: list[str] = []
+    for pat in (task.get("receives") or []):
+        rel = pat[len("repo://"):] if pat.startswith("repo://") else pat
+        files = sorted(m for m in config.root.glob(rel) if m.is_file())
+        if not files:
+            with _print_lock:
+                print(f"[{task['id']}] receives: nothing matched {pat!r} — skipped",
+                      file=sys.stderr)
+            continue
+        out += [f"repo://{m.relative_to(config.root)}" for m in files]
+    return out
+
+
 # ----------------------------------------------------------------------- plan
 def compute_waves(tasks: list[dict[str, Any]]) -> list[list[str]]:
     """Topological waves: wave N holds tasks whose needs are met by waves < N.
@@ -496,6 +544,8 @@ def _task_badges(task: dict[str, Any]) -> str:
     badges = [task["runner"]]
     if task.get("model"):
         badges.append(f"model={task['model']}")
+    if task.get("receives"):
+        badges.append(f"receives×{len(task['receives'])}")
     crew = task.get("crew") or {}
     n_crew = len(crew.get("subagents", [])) + len(crew.get("skills", []))
     if n_crew:
@@ -1322,7 +1372,7 @@ def run_coordinate(
         recorder.finish("refused", preflight_errors=errors)
         return 2
 
-    for warning in model_warnings(config, spec):
+    for warning in model_warnings(config, spec) + receives_warnings(config, spec):
         print(f"coordinate: warning: {warning}", file=sys.stderr)
 
     print(
@@ -1338,17 +1388,20 @@ def run_coordinate(
         if config.handoffs_dir.is_dir() else set()
 
     # One handoff per task: validated on write, token-accounted, pointers only.
-    commands: list[tuple[dict[str, Any], list[str], Path]] = []
-    for task in tasks:
+    # A `receives:` task DEFERS its single (append-only) write to spawn, when
+    # its cross-wave pointers actually exist on disk (see _spawn_prepare).
+    def _make_handoff(task: dict[str, Any], injected: list[str], *,
+                      do_pack: bool) -> Any:
         artifacts = list(task.get("artifacts") or [])
-        if task.get("pack"):
+        if do_pack and task.get("pack"):
             from . import pack as pack_mod  # lazy: avoids a module cycle
             bundle = pack_mod.pack(config, task["doing"],
                                    max_tokens=int(task.get("pack_max_tokens", 4000)))
             artifacts.append(f"repo://{bundle['path']}")
             print(f"[{task['id']}] packed context: {bundle['path']} "
                   f"({bundle['tokens']['actual_tokens']} tokens)")
-        handoff = ho.build_handoff(
+        artifacts += injected
+        return ho.build_handoff(
             sid=sid,
             frm=COORDINATOR,
             to=task["id"],
@@ -1363,28 +1416,60 @@ def run_coordinate(
             crew=task.get("crew") or None,
             context_ref=task.get("context_ref", "manifest@HEAD"),
         )
+
+    def _write_handoff_cmd(task: dict[str, Any],
+                           injected: list[str]) -> tuple[list[str], str]:
+        handoff = _make_handoff(task, injected, do_pack=True)
         path = ho.write_handoff(handoff, config)
         rel = str(path.relative_to(config.root))
         ev = tokens.account_handoff(config, handoff, path=rel)
-        print(
-            f"[{task['id']}] handoff {rel} "
-            f"(tokens actual={ev['actual_tokens']} saved={ev['saved_tokens']})"
-        )
+        print(f"[{task['id']}] handoff {rel} "
+              f"(tokens actual={ev['actual_tokens']} saved={ev['saved_tokens']})")
         # Isolated tasks read the handoff from the *main* checkout: handoffs
         # are gitignored, so a fresh worktree does not contain them.
         handoff_ref = str(path) if task.get("isolation") == "worktree" else rel
         cmd = _build_command(task, config, handoff_ref, sid,
                              skip_permissions=skip_permissions, telemetry=telemetry)
-        log_path = log_root / f"{sid}-{task['id']}.log"
-        log_rel = str(log_path.relative_to(config.root)) \
-            if log_path.is_relative_to(config.root) else str(log_path)
-        recorder.task(task["id"], command=cmd, handoff=rel, log=log_rel)
-        recorder.event("handoff.dispatched", task=task["id"], handoff=rel)
-        commands.append((task, cmd, log_path))
+        return cmd, rel
+
+    def _log_paths(task: dict[str, Any]) -> tuple[Path, str]:
+        lp = log_root / f"{sid}-{task['id']}.log"
+        lr = (str(lp.relative_to(config.root))
+              if lp.is_relative_to(config.root) else str(lp))
+        return lp, lr
+
+    commands: list[tuple[dict[str, Any], list[str], Path]] = []
+    deferred: set[str] = set()
+    for task in tasks:
+        log_path, log_rel = _log_paths(task)
+        if task.get("receives"):
+            # Speculative: account a no-write handoff for token visibility and
+            # show a placeholder command. The real append-only write happens at
+            # spawn — honoring --dry-run (no file is written here) and Fact #2.
+            injected = _resolve_receives(config, task)
+            tokens.account_handoff(
+                config, _make_handoff(task, injected, do_pack=False),
+                path="(speculative)")
+            disp_cmd = _build_command(
+                task, config, "<handoff resolved at spawn>", sid,
+                skip_permissions=skip_permissions, telemetry=telemetry)
+            recorder.task(task["id"], command=disp_cmd, log=log_rel)
+            deferred.add(task["id"])
+            commands.append((task, disp_cmd, log_path))
+            print(f"[{task['id']}] receives (resolved at spawn) — "
+                  f"matching now: {', '.join(injected) or 'none yet'}")
+        else:
+            cmd, rel = _write_handoff_cmd(task, [])
+            recorder.task(task["id"], command=cmd, handoff=rel, log=log_rel)
+            recorder.event("handoff.dispatched", task=task["id"], handoff=rel)
+            commands.append((task, cmd, log_path))
 
     if dry_run:
         for task, cmd, _ in commands:
-            print(f"[{task['id']}] would run: " + " ".join(shlex.quote(c) for c in cmd))
+            tail = ("  (speculative — resolved at spawn)"
+                    if task["id"] in deferred else "")
+            print(f"[{task['id']}] would run: "
+                  + " ".join(shlex.quote(c) for c in cmd) + tail)
             recorder.task(task["id"], status="dry-run")
         print("coordinate: dry run — no agents spawned")
         recorder.finish("dry-run")
@@ -1430,6 +1515,16 @@ def run_coordinate(
                       f"({info.get('commit', '?')})")
         return rc
 
+    def _spawn_prepare(task: dict[str, Any]) -> list[str]:
+        """Deferred write-at-spawn for a `receives:` task: now that its `needs`
+        have run, resolve its pointers against the populated tree, write its one
+        handoff (append-only), and return the real command."""
+        injected = _resolve_receives(config, task)
+        cmd, rel = _write_handoff_cmd(task, injected)
+        recorder.task(task["id"], handoff=rel)
+        recorder.event("handoff.dispatched", task=task["id"], handoff=rel)
+        return cmd
+
     # Dependency-aware scheduler: a task launches once everything it `needs`
     # has exited 0; tasks downstream of a failure are skipped (cascading).
     by_id = {task["id"]: (task, cmd, log_path) for task, cmd, log_path in commands}
@@ -1470,6 +1565,8 @@ def run_coordinate(
             for tid in sorted(pending):
                 if deps[tid] <= succeeded:
                     task, cmd, log_path = by_id[tid]
+                    if tid in deferred:   # write its handoff now that needs ran
+                        cmd = _spawn_prepare(task)
                     fut = pool.submit(_execute, task, cmd, log_path)
                     futures[fut] = tid
                     pending.discard(tid)

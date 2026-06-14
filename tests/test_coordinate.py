@@ -1117,3 +1117,59 @@ def test_by_agent_report_adds_by_model_rollup():
     by_model = report.split("by model:", 1)[1]
     assert "m1" in by_model and "m2" in by_model
     assert "py" not in by_model  # model-less runner stays out of the model rollup
+
+
+# ------------------------------------------ Phase C: receives: cross-wave inject
+def test_receives_must_be_list_of_strings(repo):
+    with pytest.raises(ValueError, match="receives"):
+        co.load_tasks(_write_tasks(repo.root, _spec(tasks=[
+            {"id": "a", "runner": "py", "doing": "x", "receives": "repo://x"}])))
+
+
+def test_receives_injects_upstream_pointer_at_spawn(repo):
+    # Producer writes a file; consumer `receives:` it by glob. The pointer does
+    # not exist up-front — only after the producer runs — so it proves the write
+    # is deferred to spawn.
+    cfg = _setup(repo, runners={
+        "producer": [sys.executable, "-c", "open('prod_out.txt','w').write('hello')"],
+        "consumer": _PY_OK,
+    })
+    tasks = _write_tasks(repo.root, {"sid": "rc", "tasks": [
+        {"id": "prod", "runner": "producer", "doing": "make a file"},
+        {"id": "cons", "runner": "consumer", "doing": "consume", "needs": ["prod"],
+         "receives": ["repo://prod_*.txt"]},
+    ]})
+    assert co.run_coordinate(tasks, cfg) == 0
+    handoffs = [ho.load_handoff(p, cfg) for p in cfg.handoffs_dir.glob("rc-*.json")]
+    cons = [h for h in handoffs if h["to"] == "cons"]
+    assert len(cons) == 1   # exactly one handoff, written once at spawn
+    assert "repo://prod_out.txt" in (cons[0].get("state") or {}).get("artifacts", [])
+
+
+def test_receives_dry_run_is_speculative_and_defers_write(repo, capsys):
+    cfg = _setup(repo, runners={"py": _PY_OK})
+    tasks = _write_tasks(repo.root, {"sid": "rc", "tasks": [
+        {"id": "prod", "runner": "py", "doing": "x"},
+        {"id": "cons", "runner": "py", "doing": "y", "needs": ["prod"],
+         "receives": ["repo://prod_out.txt"]},
+    ]})
+    assert co.run_coordinate(tasks, cfg, dry_run=True) == 0
+    out = capsys.readouterr().out
+    assert "[prod] would run:" in out and "[cons] would run:" in out  # ALL commands
+    assert "speculative — resolved at spawn" in out                   # marked
+    written = {h["to"] for h in
+               [ho.load_handoff(p, cfg) for p in cfg.handoffs_dir.glob("rc-*.json")]}
+    assert "prod" in written        # non-receives task: handoff written up-front
+    assert "cons" not in written    # receives task: no file written in dry-run
+
+
+def test_receives_from_worktree_upstream_warns(repo, capsys):
+    cfg = _setup(repo, runners={"py": _PY_OK})
+    _real_git(repo.root)
+    tasks = _write_tasks(repo.root, {"sid": "rc", "tasks": [
+        {"id": "iso", "runner": "py", "doing": "x", "isolation": "worktree"},
+        {"id": "cons", "runner": "py", "doing": "y", "needs": ["iso"],
+         "receives": ["repo://whatever/*.txt"]},
+    ]})
+    co.run_coordinate(tasks, cfg, dry_run=True)
+    assert "worktree-isolated upstream" in capsys.readouterr().err
