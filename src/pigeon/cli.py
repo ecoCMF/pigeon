@@ -401,7 +401,8 @@ def cmd_plan(args: argparse.Namespace) -> int:
     try:
         spec = coordinate.load_tasks(
             Path(args.tasks_file),
-            default_runner=cfg.coordinate_cfg.get("default_runner"))
+            default_runner=cfg.coordinate_cfg.get("default_runner"),
+            model_pools=cfg.coordinate_cfg.get("model_pools"))
     except ValueError as exc:
         print(f"tasks file error: {exc}", file=sys.stderr)
         return 2

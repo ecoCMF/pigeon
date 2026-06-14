@@ -126,6 +126,20 @@ def default_config(contract_dir: str = LEGACY_CONTRACT_DIR) -> dict[str, Any]:
                 "agy": [],
                 "opencode": [],
             },
+            # Named model pools for the `model_pool:` task field. A pool's models
+            # are round-robined across the tasks that name it, seeded by sid so
+            # the assignment is reproducible per session yet spread across
+            # sessions. Two forms, both accepted:
+            #   sonnet: [anthropic/claude-sonnet-4-6]        # bare list
+            #   free-opencode:                               # object form
+            #     models: [opencode/a-free, opencode/b-free]
+            #     max_concurrency: 2       # parsed now, enforced in a later phase
+            #     min_spawn_interval_s: 5
+            #     max_retries: 2
+            # Empty by default — models are opt-in per project. A runner whose
+            # template carries a `{model}` placeholder consumes the resolved
+            # model; default templates have none, so they are unaffected.
+            "model_pools": {},
             # Strict mode: when set, only these env vars (plus a functional
             # baseline: PATH/HOME/...) reach spawned agents. None = inherit all.
             "env_allowlist": None,

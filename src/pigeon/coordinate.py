@@ -57,6 +57,7 @@ Each rule can be relaxed in ``.pigeon/config.yaml`` under
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -146,14 +147,43 @@ _print_lock = threading.Lock()
 
 
 # ----------------------------------------------------------------- tasks file
+def _pool_models(pool: Any) -> list[str]:
+    """The model list of a pool in either accepted form.
+
+    A bare list ``[m1, m2]`` *is* the models; the object form
+    ``{models: [...], max_concurrency, ...}`` carries throttle knobs consumed in
+    a later phase. Returns ``[]`` for an unknown (``None``) pool; raises on a
+    malformed one (so a referenced-but-broken pool fails loud, not silently).
+    """
+    if pool is None:
+        return []
+    if isinstance(pool, list):
+        models = pool
+    elif isinstance(pool, dict):
+        models = pool.get("models") or []
+    else:
+        raise ValueError(
+            f"model_pool must be a list or a mapping, got {type(pool).__name__}"
+        )
+    if not isinstance(models, list) or not all(
+            isinstance(m, str) and m for m in models):
+        raise ValueError("model_pool models must be a list of non-empty strings")
+    return list(models)
+
+
 def load_tasks(path: Path,
-               default_runner: str | list[str] | None = None) -> dict[str, Any]:
+               default_runner: str | list[str] | None = None,
+               model_pools: dict[str, Any] | None = None) -> dict[str, Any]:
     """Load and structurally validate a tasks definition (JSON or YAML).
 
     Tasks without a ``runner`` are resolved via ``default_runner``: a name
     assigns that runner, a list round-robins across it (task order), and
     ``None`` raises — pigeon never silently routes work to a runner you
     didn't choose (that is how Pro plans evaporate in ten minutes).
+
+    A task's ``model_pool`` is resolved against ``model_pools`` into a concrete
+    ``model`` by sid-seeded round-robin (see :func:`_pool_models`), mirroring the
+    ``default_runner`` round-robin above it.
     """
     path = Path(path)
     if not path.is_file():
@@ -198,6 +228,16 @@ def load_tasks(path: Path,
         # a contract violation lands on a disposable branch, not the tree.
         if task.get("readonly") and task.get("isolation") is None:
             task["isolation"] = "worktree"
+        model = task.get("model")
+        if model is not None and (not isinstance(model, str) or not model):
+            raise ValueError(f"task {tid!r}: 'model' must be a non-empty string")
+        model_pool = task.get("model_pool")
+        if model_pool is not None and (not isinstance(model_pool, str) or not model_pool):
+            raise ValueError(f"task {tid!r}: 'model_pool' must be a non-empty string")
+        if model and model_pool:
+            raise ValueError(
+                f"task {tid!r}: set 'model' or 'model_pool', not both"
+            )
         crew = task.get("crew")
         if crew is not None:
             if not isinstance(crew, dict):
@@ -263,6 +303,27 @@ def load_tasks(path: Path,
                              "name or a non-empty list of names")
         for i, task in enumerate(unassigned):
             task["runner"] = pool[i % len(pool)]
+
+    # Model pools: round-robin a pool's models across the tasks that name it,
+    # seeded by sid so the assignment is reproducible per session yet rotated
+    # across sessions (so concurrent sessions don't all start at models[0]).
+    # `i` counts only the tasks using *that* pool, in task-definition order.
+    pools = model_pools or {}
+    pool_index: dict[str, int] = {}
+    for task in tasks:
+        pname = task.get("model_pool")
+        if not pname:
+            continue
+        models = _pool_models(pools.get(pname))
+        if not models:
+            raise ValueError(
+                f"task {task['id']!r}: model_pool {pname!r} is undefined or empty "
+                f"(configured pools: {', '.join(sorted(pools)) or 'none'})"
+            )
+        offset = int(hashlib.sha1(sid.encode("utf-8")).hexdigest(), 16) % len(models)
+        i = pool_index.get(pname, 0)
+        task["model"] = models[(offset + i) % len(models)]
+        pool_index[pname] = i + 1
     return spec
 
 
@@ -354,8 +415,17 @@ def preflight(
                 f"task {task['id']!r}: unknown runner {name!r} "
                 f"(configured: {', '.join(sorted(runners))})"
             )
-        elif check_binaries and shutil.which(template[0]) is None:
+            continue
+        if check_binaries and shutil.which(template[0]) is None:
             errors.append(f"task {task['id']!r}: runner binary not found on PATH: {template[0]!r}")
+        # A {model} placeholder MUST resolve, or _fill leaves it literal and the
+        # child CLI receives a bogus '{model}' argument (the unmatched-placeholder
+        # trap that motivates this whole feature).
+        if any("{model}" in arg for arg in template) and not task.get("model"):
+            errors.append(
+                f"task {task['id']!r}: runner {name!r} template contains '{{model}}' "
+                "but no model resolved — set 'model:' or 'model_pool:' on the task"
+            )
 
     isolated = [t["id"] for t in spec["tasks"] if t.get("isolation") == "worktree"]
     if isolated:
@@ -368,6 +438,22 @@ def preflight(
                 f"commit (tasks: {', '.join(isolated)})"
             )
     return errors
+
+
+def model_warnings(config: Config, spec: dict[str, Any]) -> list[str]:
+    """Non-blocking advisories about model wiring (the inverse of the preflight
+    error): a task resolved a model but its runner template has no ``{model}``
+    placeholder to receive it, so the model is silently ignored."""
+    runners = config.coordinate_cfg["runners"]
+    warnings: list[str] = []
+    for task in spec["tasks"]:
+        template = runners.get(task["runner"]) or []
+        if task.get("model") and not any("{model}" in arg for arg in template):
+            warnings.append(
+                f"task {task['id']!r} resolved model {task['model']!r} but runner "
+                f"{task['runner']!r} has no '{{model}}' placeholder — model ignored"
+            )
+    return warnings
 
 
 # ----------------------------------------------------------------------- plan
@@ -408,6 +494,8 @@ def longest_chain(tasks: list[dict[str, Any]]) -> list[str]:
 
 def _task_badges(task: dict[str, Any]) -> str:
     badges = [task["runner"]]
+    if task.get("model"):
+        badges.append(f"model={task['model']}")
     crew = task.get("crew") or {}
     n_crew = len(crew.get("subagents", [])) + len(crew.get("skills", []))
     if n_crew:
@@ -435,6 +523,7 @@ def plan(config: Config, spec: dict[str, Any]) -> dict[str, Any]:
         "tasks": {
             t["id"]: {
                 "runner": t["runner"],
+                **({"model": t["model"]} if t.get("model") else {}),
                 "needs": list(t.get("needs") or []),
                 "isolation": t.get("isolation") or "shared",
                 "pack": bool(t.get("pack")),
@@ -487,7 +576,7 @@ def _utcnow() -> str:
 # Scalar fields worth carrying into the event stream (events are the
 # primary object; logs and the full manifest are the drill-down).
 _EVENT_FIELDS = ("exit_code", "duration_s", "output_lines", "skipped_because",
-                 "return_handoff", "branch")
+                 "return_handoff", "branch", "model")
 
 
 class RunRecorder:
@@ -853,6 +942,12 @@ def _build_command(
         playbooks_rel = str(config.memory_dir.relative_to(config.root) / "playbooks")
         prompt += " " + crew_instructions(task["crew"], playbooks_rel)
     subs["prompt"] = prompt
+    # {model} is substituted ONLY when a model resolved (direct `model:` or a
+    # `model_pool:`). Absent that, it is never added to subs, so a template with
+    # no {model} is byte-identical to today and a stray {model} is caught by
+    # preflight rather than silently reaching the CLI as a literal arg.
+    if task.get("model"):
+        subs["model"] = task["model"]
     cmd = [_fill(arg, subs) for arg in ccfg["runners"][task["runner"]]]
     if skip_permissions:
         cmd += ccfg.get("skip_permissions_flags", {}).get(task["runner"], [])
@@ -1060,6 +1155,7 @@ def _run_task(
     *,
     sid: str = "",
     runner: str = "",
+    model: str = "",
     cwd: Path | None = None,
     budget: BudgetTracker | None = None,
     procs: dict[str, subprocess.Popen] | None = None,
@@ -1120,6 +1216,8 @@ def _run_task(
             "baseline_tokens": 0, "saved_tokens": 0,
             "usage": telemetry["usage"],
         }
+        if model:
+            event["model"] = model
         if "total_cost_usd" in telemetry:
             event["cost_usd"] = telemetry["total_cost_usd"]
         tokens.record(config, event)
@@ -1154,7 +1252,8 @@ def run_coordinate(
 ) -> int:
     """Coordinate a tasks file end to end. 0 = all green, 1 = failures, 2 = refused."""
     spec = load_tasks(Path(tasks_path),
-                      default_runner=config.coordinate_cfg.get("default_runner"))
+                      default_runner=config.coordinate_cfg.get("default_runner"),
+                      model_pools=config.coordinate_cfg.get("model_pools"))
     sid: str = spec["sid"]
     tasks: list[dict[str, Any]] = spec["tasks"]
 
@@ -1185,6 +1284,9 @@ def run_coordinate(
         print("coordinate: refusing to spawn agents (see preflight errors)", file=sys.stderr)
         recorder.finish("refused", preflight_errors=errors)
         return 2
+
+    for warning in model_warnings(config, spec):
+        print(f"coordinate: warning: {warning}", file=sys.stderr)
 
     print(
         f"coordinate: run={recorder.data['run_id']} tasks={len(tasks)} "
@@ -1239,7 +1341,8 @@ def run_coordinate(
         log_path = log_root / f"{sid}-{task['id']}.log"
         log_rel = str(log_path.relative_to(config.root)) \
             if log_path.is_relative_to(config.root) else str(log_path)
-        recorder.task(task["id"], command=cmd, handoff=rel, log=log_rel)
+        recorder.task(task["id"], command=cmd, handoff=rel, log=log_rel,
+                      **({"model": task["model"]} if task.get("model") else {}))
         recorder.event("handoff.dispatched", task=task["id"], handoff=rel)
         commands.append((task, cmd, log_path))
 
@@ -1258,7 +1361,8 @@ def run_coordinate(
         tid = task["id"]
         if task.get("isolation") != "worktree":
             return _run_task(tid, cmd, config, log_path, recorder,
-                             sid=sid, runner=task["runner"], budget=budget,
+                             sid=sid, runner=task["runner"],
+                             model=task.get("model") or "", budget=budget,
                              procs=running_procs)
         try:
             wt_dir, branch = _worktree_setup(config, run_id, tid)
@@ -1270,7 +1374,8 @@ def run_coordinate(
             return 125
         recorder.task(tid, worktree=str(wt_dir), branch=branch)
         rc = _run_task(tid, cmd, config, log_path, recorder,
-                       sid=sid, runner=task["runner"], cwd=wt_dir, budget=budget,
+                       sid=sid, runner=task["runner"],
+                       model=task.get("model") or "", cwd=wt_dir, budget=budget,
                        procs=running_procs)
         try:
             info, harvested = _worktree_finish(config, tid, wt_dir, branch)
